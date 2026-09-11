@@ -27,8 +27,8 @@ diff_cont:
 
     # wheels_per_side: x
     # wheel_separation_multiplier: x
-    left_wheel_radius_multiplier: 1.0
-    right_wheel_radius_multiplier: 1.0
+    left_wheel_radius_multiplier: 0.96
+    right_wheel_radius_multiplier: 1.04
     # i have uncommented above two lines
     # odom_frame_id: x
     # pose_covariance_diagonal: x
