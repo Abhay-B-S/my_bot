@@ -27,7 +27,7 @@ diff_cont:
 
     # wheels_per_side: x
     # wheel_separation_multiplier: x
-    wheel_separation_multiplier: 0.929
+    wheel_separation_multiplier: 0.807
     left_wheel_radius_multiplier: 0.98
     right_wheel_radius_multiplier: 1.02
     # i have uncommented above two lines
