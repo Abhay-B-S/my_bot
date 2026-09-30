@@ -1,0 +1,6 @@
+# Stable device names for the robot (install: sudo cp to /etc/udev/rules.d/ then reload).
+# Match on USB vendor/product so the names do not depend on plug-in order or USB port.
+# YDLIDAR X2 adapter (Silicon Labs CP2102)  -> /dev/ydlidar
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="ydlidar", GROUP="dialout", MODE="0660"
+# Arduino Uno clone (WCH CH340)              -> /dev/arduino
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="arduino", GROUP="dialout", MODE="0660"
