@@ -60,6 +60,21 @@ After steps 1 to 8 (sim ... delivery manager, with the REAL locations file), in 
 Notes: names are edited in the `TEACHERS` list at the top of `web/index.html`. A request left `pending` in the database is picked up when the bridge starts. On bridge start, half-finished requests are marked failed. Requests are never forwarded twice (the manager remembers website ids). Hosting for phones on cell data: not done yet (`firebase.json`, `.firebaserc` are ready; deploy with `npx firebase-tools` from `src/my_bot`).
 Observed: several Nav2 goals abort once or twice (status 6) and succeed on a retry; cause not investigated.
 
+## A3. Website login (Firebase Authentication)  (set up and tested 2026-10-08)
+Who: `abhaybs` (cabin A), `darshanraju` (B), `khushal` (C), `abhisheksj` (D), plus `robot` (the bridge). Login emails are `<id>@example.com` (fake; Firebase rejects `.demo`). The page accepts the short ID or the full address.
+- Accounts: Firebase console > Authentication > Users > Add user (password >= 6 characters). Create the `robot` account BEFORE deploying the rules, or anyone could register that name.
+- People list: `members.json` (id -> cabin/name) and the `TEACHERS` list in `web/index.html` must match. Import: `npx firebase-tools database:set /members members.json --project delivery-robot-demo --force`.
+- Rules (`database.rules.json`): only members read; a person creates requests only from their own cabin and presses OK shipped / Received only as that request's sender / receiver at the right status; only the robot account writes statuses. Deploy: `npx firebase-tools deploy --only database`. Tested live with 34 break-in attempts, all refused as intended.
+- Page: `npx firebase-tools deploy --only hosting` from `src/my_bot`, live at https://delivery-robot-demo.web.app (browsers may cache it: reload or reopen the tab).
+- Robot password (never in git): `read -s -p "Robot password: " p; echo "$p" > ~/.delivery_robot_password; chmod 600 ~/.delivery_robot_password; unset p; echo`. The bridge reads it at start and refuses to run if it is wrong or missing.
+- Forgotten password: console cannot show it; delete the user and add it again.
+- FALLBACK to the old open database (no login): `npx firebase-tools deploy --only database` with `database.rules.open.json` copied over `database.rules.json`, run the bridge with `--ros-args -p use_auth:=false`, and use the old page from git history (commit 0d23485).
+
+## A4. When the laser arcs stop matching (AMCL lost the robot)  (simulation)
+Symptom: red arcs far from the obstacles, Nav2 says "failed to generate a valid path" / "Trajectory Hits Obstacle", deliveries stop. It does NOT fix itself and needs no restart:
+`python3 src/my_bot/scripts/sim_set_pose_from_gazebo.py` reads the robot's true pose from Gazebo and sets AMCL to it (sim only). On the real robot click 2D Pose Estimate instead.
+Seen on 2026-10-08: AMCL was 3.7 m off. The sim room has only 8 small pillars and no walls, so the laser has little to lock on to; the real staffroom with walls should be better. Not yet done: enable AMCL recovery particles (`recovery_alpha_fast/slow` are 0).
+
 ## B. Teleop / recording positions (optional)
 - Teleop (slow it down with `x`/`c`, `k` stops):
   `ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_key`

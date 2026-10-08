@@ -1,0 +1,43 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "members": {
+      "$id": {
+        ".read": "auth != null && auth.token.email == $id + '@example.com'"
+      }
+    },
+
+    "robot": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
+    },
+
+    "requests": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      "$id": {
+        ".write": "auth != null && (root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot' || (!data.exists() && newData.exists() && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == newData.child('sender').val() && newData.child('sender').val() != newData.child('destination').val() && newData.child('status').val() == 'pending' && !newData.child('shipped').exists() && !newData.child('received').exists()))",
+
+        "sender": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
+        "destination": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
+        "senderName": { ".validate": "newData.isString() && newData.val().length < 60" },
+        "receiverName": { ".validate": "newData.isString() && newData.val().length < 60" },
+        "status": { ".validate": "newData.isString() && newData.val().length < 40" },
+        "detail": { ".validate": "newData.isString() && newData.val().length < 400" },
+        "created": { ".validate": "newData.isNumber()" },
+
+        "shipped": {
+          ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('sender').val() && data.parent().child('status').val() == 'wait_shipped' && newData.val() == true",
+          ".validate": "newData.val() == true"
+        },
+        "received": {
+          ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('destination').val() && data.parent().child('status').val() == 'wait_received' && newData.val() == true",
+          ".validate": "newData.val() == true"
+        },
+
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}

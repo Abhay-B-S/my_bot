@@ -26,12 +26,15 @@
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
           padding: 14px; margin-bottom: 14px; }
   label { display: block; font-size: .85rem; color: var(--muted); margin: 10px 0 4px; }
-  select, button { width: 100%; font: inherit; border-radius: 10px; padding: 12px; }
-  select { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
+  select, input, button { width: 100%; font: inherit; border-radius: 10px; padding: 12px; }
+  select, input { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
   button { border: 0; background: var(--accent); color: var(--accent-text); font-weight: 600;
            margin-top: 12px; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
   button.big { padding: 16px; font-size: 1.05rem; }
+  button.link { background: none; color: var(--accent); width: auto; padding: 4px 8px; margin: 0; font-weight: 600; }
+  .hidden { display: none; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   #robot { display: flex; align-items: center; gap: 10px; }
   .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.on { background: var(--ok); } .dot.off { background: var(--bad); }
@@ -47,6 +50,7 @@
   .chip.bad { background: var(--bad-bg); color: var(--bad); }
   .alert { background: var(--warn-bg); color: var(--text); border-radius: 10px; padding: 10px 12px;
            margin-top: 10px; font-weight: 600; }
+  .error { color: var(--bad); min-height: 1.3em; margin-top: 8px; font-size: .9rem; }
   #msg { min-height: 1.3em; margin-top: 8px; font-size: .9rem; }
 </style>
 </head>
@@ -54,37 +58,56 @@
 <main>
   <h1>Campus Delivery Robot</h1>
 
-  <div class="card" id="robot">
-    <span class="dot" id="dot"></span>
-    <div><strong id="robotName">Robot</strong><div id="robotText" class="muted">Connecting...</div></div>
-  </div>
+  <!-- Login: shown until someone is signed in -->
+  <form id="login" class="card hidden" autocomplete="on">
+    <h2>Log in</h2>
+    <label for="uid">ID</label>
+    <input id="uid" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+    <label for="pw">Password</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password" required>
+    <button id="loginBtn" type="submit">Log in</button>
+    <div id="loginMsg" class="error"></div>
+  </form>
 
-  <div class="card">
-    <h2>Who are you?</h2>
-    <select id="me" aria-label="Your name"></select>
-    <h2 style="margin-top:16px">Send a parcel</h2>
-    <label for="to">Send to</label>
-    <select id="to"></select>
-    <button id="send">Request delivery</button>
-    <div id="msg" class="muted"></div>
-  </div>
+  <!-- The app: shown after login -->
+  <div id="app" class="hidden">
+    <div class="card" id="robot">
+      <span class="dot" id="dot"></span>
+      <div><strong id="robotName">Robot</strong><div id="robotText" class="muted">Connecting...</div></div>
+    </div>
 
-  <div class="card">
-    <h2>My deliveries</h2>
-    <div id="list" class="muted">Nothing yet.</div>
+    <div class="card">
+      <div class="row">
+        <div><strong id="whoName"></strong><div id="whoCabin" class="muted"></div></div>
+        <button id="logout" class="link" type="button">Log out</button>
+      </div>
+      <h2 style="margin-top:16px">Send a parcel</h2>
+      <label for="to">Send to</label>
+      <select id="to"></select>
+      <button id="send">Request delivery</button>
+      <div id="msg" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h2>My deliveries</h2>
+      <div id="list" class="muted">Nothing yet.</div>
+    </div>
   </div>
 </main>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script>
-// ---- Edit these: names shown in the dropdowns, and the robot's map spot (cabin) for each ----
-// "cabin" must match a name in config/locations.yaml (cabin_A ... cabin_D).
+// ---- People who can log in: login ID, name shown on screen, and the robot's map spot (cabin) ----
+// "cabin" must match a name in config/locations.yaml. The same list (id -> cabin) is enforced by the
+// database rules (members.json), so editing this list alone does not give anyone extra rights.
+const EMAIL_DOMAIN = "@example.com";
 const TEACHERS = [
-  { name: "Teacher A", cabin: "cabin_A" },
-  { name: "Teacher B", cabin: "cabin_B" },
-  { name: "Teacher C", cabin: "cabin_C" },
-  { name: "Teacher D", cabin: "cabin_D" },
+  { id: "abhaybs",     name: "Abhay B S",     cabin: "cabin_A" },
+  { id: "darshanraju", name: "Darshan Raju",  cabin: "cabin_B" },
+  { id: "khushal",     name: "Khushal",       cabin: "cabin_C" },
+  { id: "abhisheksj",  name: "Abhishek S J",  cabin: "cabin_D" },
 ];
 
 // Firebase web config (identifies the project; it is not a password)
@@ -100,6 +123,7 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
+const auth = firebase.auth();
 
 const STATUS = {   // status text on a request -> [what the user sees, chip colour]
   pending: ["Sending to the robot...", ""],
@@ -113,47 +137,87 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
   rejected: ["Request rejected", "bad"],
 };
 
-const meSel = document.getElementById("me"), toSel = document.getElementById("to");
-const sendBtn = document.getElementById("send"), msgEl = document.getElementById("msg");
-let requests = {}, robot = null, offset = 0, lastStatus = {};
+const $ = id => document.getElementById(id);
+let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, unsub = [];
 
-function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
-function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function cabinLabel(c) { return c.replace("_", " "); }
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+function show(loggedIn) {
+  $("login").classList.toggle("hidden", loggedIn);
+  $("app").classList.toggle("hidden", !loggedIn);
+}
 
-function fillSelect(sel, items, selected) {
-  sel.innerHTML = "";
-  items.forEach((t, i) => {
-    const o = document.createElement("option");
-    o.value = i; o.textContent = t.name + " (" + t.cabin.replace("_", " ") + ")";
-    sel.appendChild(o);
+// ---------- login ----------
+$("login").onsubmit = ev => {
+  ev.preventDefault();
+  // Accept a short ID ("abhaybs") or the full address ("abhaybs@example.com").
+  const id = $("uid").value.trim().toLowerCase(), pw = $("pw").value;
+  const email = id.includes("@") ? id : id + EMAIL_DOMAIN;
+  $("loginMsg").textContent = ""; $("loginBtn").disabled = true;
+  auth.signInWithEmailAndPassword(email, pw)
+    .then(() => { $("pw").value = ""; })
+    .catch(e => {
+      const wrong = ["auth/wrong-password", "auth/user-not-found", "auth/invalid-credential",
+                     "auth/invalid-login-credentials"];
+      $("loginMsg").textContent = wrong.includes(e.code) ? "Wrong ID or password."
+        : e.code === "auth/invalid-email" ? "That ID does not look right. Type only your ID, for example abhaybs."
+        : e.code === "auth/network-request-failed" ? "No internet connection."
+        : e.code === "auth/too-many-requests" ? "Too many tries. Wait a minute and try again."
+        : "Could not log in (" + e.code + ").";
+    })
+    .finally(() => { $("loginBtn").disabled = false; });
+};
+$("logout").onclick = () => auth.signOut();
+
+auth.onAuthStateChanged(user => {
+  unsub.forEach(f => f()); unsub = [];
+  requests = {}; robot = null; lastStatus = {};
+  if (!user) { current = null; show(false); return; }
+  const id = (user.email || "").replace(EMAIL_DOMAIN, "");
+  current = TEACHERS.find(t => t.id === id) || null;
+  if (!current) {                                  // e.g. the robot's account on the page
+    show(false); $("loginMsg").textContent = "This account cannot use the page."; auth.signOut(); return;
+  }
+  show(true);
+  $("whoName").textContent = current.name;
+  $("whoCabin").textContent = "Cabin " + cabinLabel(current.cabin).replace("cabin ", "");
+  const others = TEACHERS.filter(t => t.id !== current.id);
+  $("to").innerHTML = "";
+  others.forEach((t, i) => {
+    const o = el("option", "", t.name + " (" + cabinLabel(t.cabin) + ")"); o.value = i; $("to").appendChild(o);
   });
-  if (selected !== null && selected < items.length) sel.value = selected;
-}
-function me() { return TEACHERS[+meSel.value]; }
-function refreshTo() {
-  const others = TEACHERS.filter((t, i) => i !== +meSel.value);
-  fillSelect(toSel, others, 0);
-  toSel._items = others;
-}
-const saved = load("me");
-fillSelect(meSel, TEACHERS, saved !== null ? +saved : 0);
-refreshTo();
-meSel.onchange = () => { store("me", meSel.value); refreshTo(); render(); };
+  $("to")._items = others;
+  listen(db.ref("robot"), s => { robot = s.val(); renderRobot(); });
+  listen(db.ref("requests").limitToLast(50), s => { requests = s.val() || {}; render(); });
+});
 
-sendBtn.onclick = () => {
-  const to = toSel._items[+toSel.value];
-  sendBtn.disabled = true;
+function listen(ref, cb) {
+  const wrapped = s => cb(s);
+  ref.on("value", wrapped, err => { $("msg").textContent = "Cannot read data: " + err.message; });
+  unsub.push(() => ref.off("value", wrapped));
+}
+
+// ---------- actions ----------
+$("send").onclick = () => {
+  const to = $("to")._items[+$("to").value], btn = $("send");
+  btn.disabled = true;
   db.ref("requests").push({
-    sender: me().cabin, destination: to.cabin,
-    senderName: me().name, receiverName: to.name,
+    sender: current.cabin, destination: to.cabin,
+    senderName: current.name, receiverName: to.name,
     status: "pending", detail: "", created: firebase.database.ServerValue.TIMESTAMP
-  }).then(() => { msgEl.textContent = "Request sent."; })
-    .catch(e => { msgEl.textContent = "Could not send: " + e.message; })
-    .finally(() => { setTimeout(() => { sendBtn.disabled = false; msgEl.textContent = ""; }, 2500); });
+  }).then(() => { $("msg").textContent = "Request sent."; })
+    .catch(e => { $("msg").textContent = "Could not send: " + e.message; })
+    .finally(() => { setTimeout(() => { btn.disabled = false; $("msg").textContent = ""; }, 2500); });
 };
 
 function press(id, field) {
-  db.ref("requests/" + id + "/" + field).set(true);
+  db.ref("requests/" + id + "/" + field).set(true)
+    .catch(e => { $("msg").textContent = "Could not send: " + e.message; });
 }
 
 function beep() {
@@ -165,15 +229,10 @@ function beep() {
   } catch (e) {}
 }
 
-function el(tag, cls, text) {
-  const n = document.createElement(tag);
-  if (cls) n.className = cls;
-  if (text !== undefined) n.textContent = text;
-  return n;
-}
-
+// ---------- display ----------
 function render() {
-  const mine = me().cabin, list = document.getElementById("list");
+  if (!current) return;
+  const mine = current.cabin, list = $("list");
   const ids = Object.keys(requests).filter(id => {
     const r = requests[id];
     return r && (r.sender === mine || r.destination === mine);
@@ -201,8 +260,7 @@ function render() {
     }
     list.appendChild(card);
     // Beep when it is this person's turn (also the first time they see it), and when their parcel is
-    // delivered or a delivery fails. The memory is kept per person AND per request, so switching the
-    // "Who are you?" name in one browser behaves like two phones.
+    // delivered or a delivery fails.
     const key = mine + ":" + id, seen = key in lastStatus;
     const act = (r.status === "wait_shipped" && r.sender === mine) || (r.status === "wait_received" && r.destination === mine);
     const done = (r.status === "delivered" && r.sender === mine) || r.status === "failed";
@@ -212,7 +270,7 @@ function render() {
 }
 
 function renderRobot() {
-  const dot = document.getElementById("dot"), txt = document.getElementById("robotText");
+  const dot = $("dot"), txt = $("robotText");
   const online = robot && robot.heartbeat && (Date.now() + offset - robot.heartbeat) < 20000;
   dot.className = "dot " + (online ? "on" : "off");
   if (!robot) { txt.textContent = "No robot information yet."; return; }
@@ -220,8 +278,6 @@ function renderRobot() {
 }
 
 db.ref(".info/serverTimeOffset").on("value", s => { offset = s.val() || 0; renderRobot(); });
-db.ref("robot").on("value", s => { robot = s.val(); renderRobot(); });
-db.ref("requests").limitToLast(50).on("value", s => { requests = s.val() || {}; render(); });
 setInterval(renderRobot, 5000);
 </script>
 </body>

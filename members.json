@@ -1,0 +1,21 @@
+{
+  "abhaybs": {
+    "cabin": "cabin_A",
+    "name": "Abhay B S"
+  },
+  "darshanraju": {
+    "cabin": "cabin_B",
+    "name": "Darshan Raju"
+  },
+  "khushal": {
+    "cabin": "cabin_C",
+    "name": "Khushal"
+  },
+  "abhisheksj": {
+    "cabin": "cabin_D",
+    "name": "Abhishek S J"
+  },
+  "robot": {
+    "role": "robot"
+  }
+}
