@@ -38,7 +38,9 @@ twist_mux is started by `launch_sim.launch.py` itself: do not start it by hand.
    `ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_key`
 6. RViz: add `/global_costmap/costmap` as a Map (Color Scheme `costmap`), then **2D Goal Pose** / Navigation2 Goal / waypoint mode.
 
-## B. Real robot (Pi `ubuntu@10.154.23.17` + laptop)
+## B. Real robot (Pi `ubuntu@<pi-ip>` + laptop)
+The Pi's address depends on the network. On the phone hotspot `SJBIT 2.0` it was `10.16.139.17` (2026-10-08); earlier, on another network, `10.154.23.17`. Find it with `getent hosts ubuntu.local` or by pinging the hotspot range and looking for a Raspberry Pi hardware address (`d8:3a:dd:...`) in `ip neigh`. A Pi needs 1 to 2 minutes after power-on before it answers. Laptop and Pi must be on the SAME hotspot.
+
 Pi terminals (`ssh ubuntu@10.154.23.17`, key login):
 
 1. `cd ~/robot_ws && source /opt/ros/foxy/setup.bash && source install/setup.bash && ros2 launch my_bot launch_robot.launch.py`

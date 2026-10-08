@@ -2,8 +2,10 @@
 """Save the robot's current map-frame pose (from AMCL) under a name.
 
 Usage:  python3 src/my_bot/scripts/record_location.py cabin_A   (a trailing --sim is accepted and ignored)
+        python3 src/my_bot/scripts/record_location.py cabin_A --file src/my_bot/config/locations_real.yaml
+(--file writes to another file, so the real robot's spots never overwrite the simulation's.)
 Drive the robot to the spot first. The pose is written into
-src/my_bot/config/locations.yaml as  name: {x, y, yaw}  (map frame, metres/radians).
+src/my_bot/config/locations.yaml (or --file) as  name: {x, y, yaw}  (map frame, metres/radians).
 """
 import math
 import os
@@ -21,7 +23,16 @@ LOCATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    argv = sys.argv[1:]
+    out_file = LOCATIONS_FILE
+    if '--file' in argv:                      # e.g. --file src/my_bot/config/locations_real.yaml
+        i = argv.index('--file')
+        if i + 1 >= len(argv):
+            print(__doc__)
+            sys.exit(1)
+        out_file = os.path.abspath(argv[i + 1])
+        del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith('--')]
     if len(args) != 1:
         print(__doc__)
         sys.exit(1)
@@ -50,14 +61,14 @@ def main():
     entry = {'x': round(p.position.x, 3), 'y': round(p.position.y, 3), 'yaw': round(yaw, 3)}
 
     data = {}
-    if os.path.exists(LOCATIONS_FILE):
-        with open(LOCATIONS_FILE) as f:
+    if os.path.exists(out_file):
+        with open(out_file) as f:
             data = yaml.safe_load(f) or {}
     data.setdefault('frame_id', 'map')
     data.setdefault('locations', {})[name] = entry
-    with open(LOCATIONS_FILE, 'w') as f:
+    with open(out_file, 'w') as f:
         yaml.safe_dump(data, f, sort_keys=False)
-    print('Saved %s = %s  ->  %s' % (name, entry, os.path.normpath(LOCATIONS_FILE)))
+    print('Saved %s = %s  ->  %s' % (name, entry, os.path.normpath(out_file)))
 
 
 if __name__ == '__main__':

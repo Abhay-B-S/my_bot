@@ -75,6 +75,24 @@ Symptom: red arcs far from the obstacles, Nav2 says "failed to generate a valid 
 `python3 src/my_bot/scripts/sim_set_pose_from_gazebo.py` reads the robot's true pose from Gazebo and sets AMCL to it (sim only). On the real robot click 2D Pose Estimate instead.
 Seen on 2026-10-08: AMCL was 3.7 m off. The sim room has only 8 small pillars and no walls, so the laser has little to lock on to; the real staffroom with walls should be better. Not yet done: enable AMCL recovery particles (`recovery_alpha_fast/slow` are 0).
 
+## A5. REAL ROBOT delivery  (tested 2026-10-08 in a practice house: full delivery from two phones worked)
+Stop the simulation first (same ROS domain 0). Laptop and Pi on the SAME hotspot (Pi address: see RUNBOOK_NAV2_SLAM.md B). Every laptop terminal starts with the usual first line (`cd ~/dev_ws && source /opt/ros/foxy/setup.bash && source install/setup.bash`).
+Pi (two `ssh ubuntu@<pi-ip>` terminals, same commands as RUNBOOK_NAV2_SLAM.md B.1 and B.2): `launch_robot.launch.py`, then `ydlidar.launch.py`. Check from the laptop: `/scan` about 11 Hz, `/odom` 30 Hz.
+Laptop, in this order:
+1. RViz without sim time: `ros2 run rviz2 rviz2 -d src/my_bot/config/main.rviz` (untick Camera).
+2. twist_mux by hand (not installed on the Pi) and teleop (press `x` about 10 times first, speed about 0.15, `c` a few times for turning): commands in RUNBOOK_NAV2_SLAM.md B.
+3. ONE TIME per place: map it with slam_toolbox (RUNBOOK_NAV2_SLAM.md B.5: mapping launch, drive slowly along the walls, return to the start, save_map + serialize_map to `maps/<name>`). Start mapping with the robot on the spot that will be `home`. Check there are no doubled walls.
+4. Localisation: `ros2 launch my_bot localization_launch.py map:=./maps/<name>.yaml use_sim_time:=false`; RViz Fixed Frame `map`; 2D Pose Estimate at the start pose (map origin); the red scan must sit on the black walls.
+5. ONE TIME per place: record the spots into their OWN file, robot stopped and scan matching:
+   `python3 src/my_bot/scripts/record_location.py cabin_A --file src/my_bot/config/locations_real.yaml` (also `home`, `cabin_B`, `cabin_C`, `cabin_D`). Then check them:
+   `python3 src/my_bot/scripts/check_locations.py maps/<name>.yaml src/my_bot/config/locations_real.yaml`
+   Aim for clearance >= 0.45 m from walls (0.25 m was too close in the first try) and every spot reaching every other.
+6. Nav2: `ros2 launch my_bot navigation_launch.py use_sim_time:=false map_subscribe_transient_local:=true`. First test: one short 2D Goal Pose with a hand on the power switch.
+7. Delivery manager with the REAL spots: `python3 src/my_bot/scripts/delivery_manager.py --ros-args -p locations_file:=./src/my_bot/config/locations_real.yaml`. Test once from the command line (A.10 to A.12 above) before using the phones.
+8. Bridge (needs internet through the hotspot): `python3 src/my_bot/scripts/firebase_bridge.py`. Phones: https://delivery-robot-demo.web.app (see A3 for logins).
+Quick stops: power switch; or Ctrl-C in the Nav2 terminal (the robot stops within about 0.5 s).
+The practice-house spots (`config/locations_real.yaml`) and map (`maps/practice_room.*`) are NOT in git; the real staffroom needs its own map and spots. Not yet done: a single start script for all of this.
+
 ## B. Teleop / recording positions (optional)
 - Teleop (slow it down with `x`/`c`, `k` stops):
   `ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_key`
