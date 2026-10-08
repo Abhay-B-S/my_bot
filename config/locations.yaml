@@ -1,0 +1,22 @@
+frame_id: map
+locations:
+  home:
+    x: -0.131
+    y: 0.003
+    yaw: 0.088
+  cabin_A:
+    x: 1.609
+    y: 0.071
+    yaw: 1.582
+  cabin_B:
+    x: 1.424
+    y: 0.53
+    yaw: 1.976
+  cabin_C:
+    x: 1.085
+    y: 1.483
+    yaw: 1.909
+  cabin_D:
+    x: -0.847
+    y: 1.68
+    yaw: -1.518
