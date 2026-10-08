@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Campus Delivery Robot</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1d2330; --muted: #5d6677; --line: #dfe3ea;
+    --accent: #1a56db; --accent-text: #ffffff; --ok: #0f7b3f; --warn: #a15c00; --bad: #b42318;
+    --ok-bg: #e3f6ea; --warn-bg: #fff1d6; --bad-bg: #fde7e4; --info-bg: #e6eefc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151c; --card: #1c212c; --text: #e8ebf2; --muted: #9aa4b8; --line: #2c3342;
+      --accent: #6c9bff; --accent-text: #0b1020; --ok: #62d68f; --warn: #ffc15a; --bad: #ff8a7d;
+      --ok-bg: #16301f; --warn-bg: #3a2c10; --bad-bg: #3a1a17; --info-bg: #1b2a49;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.35rem; margin: 8px 0 12px; }
+  h2 { font-size: 1rem; margin: 0 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+          padding: 14px; margin-bottom: 14px; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin: 10px 0 4px; }
+  select, button { width: 100%; font: inherit; border-radius: 10px; padding: 12px; }
+  select { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
+  button { border: 0; background: var(--accent); color: var(--accent-text); font-weight: 600;
+           margin-top: 12px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.big { padding: 16px; font-size: 1.05rem; }
+  #robot { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); } .dot.off { background: var(--bad); }
+  #robotText { font-size: .92rem; }
+  .muted { color: var(--muted); font-size: .85rem; }
+  .req { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+  .req:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+  .route { font-weight: 600; }
+  .chip { display: inline-block; font-size: .8rem; font-weight: 600; padding: 3px 10px;
+          border-radius: 999px; background: var(--info-bg); margin-top: 6px; }
+  .chip.ok { background: var(--ok-bg); color: var(--ok); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn); }
+  .chip.bad { background: var(--bad-bg); color: var(--bad); }
+  .alert { background: var(--warn-bg); color: var(--text); border-radius: 10px; padding: 10px 12px;
+           margin-top: 10px; font-weight: 600; }
+  #msg { min-height: 1.3em; margin-top: 8px; font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Campus Delivery Robot</h1>
+
+  <div class="card" id="robot">
+    <span class="dot" id="dot"></span>
+    <div><strong id="robotName">Robot</strong><div id="robotText" class="muted">Connecting...</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Who are you?</h2>
+    <select id="me" aria-label="Your name"></select>
+    <h2 style="margin-top:16px">Send a parcel</h2>
+    <label for="to">Send to</label>
+    <select id="to"></select>
+    <button id="send">Request delivery</button>
+    <div id="msg" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <h2>My deliveries</h2>
+    <div id="list" class="muted">Nothing yet.</div>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+// ---- Edit these: names shown in the dropdowns, and the robot's map spot (cabin) for each ----
+// "cabin" must match a name in config/locations.yaml (cabin_A ... cabin_D).
+const TEACHERS = [
+  { name: "Teacher A", cabin: "cabin_A" },
+  { name: "Teacher B", cabin: "cabin_B" },
+  { name: "Teacher C", cabin: "cabin_C" },
+  { name: "Teacher D", cabin: "cabin_D" },
+];
+
+// Firebase web config (identifies the project; it is not a password)
+const firebaseConfig = {
+  apiKey: "AIzaSyByOIQUag5MRhQiflwGldqNYPJGWaO-QTo",
+  authDomain: "delivery-robot-demo.firebaseapp.com",
+  databaseURL: "https://delivery-robot-demo-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "delivery-robot-demo",
+  storageBucket: "delivery-robot-demo.firebasestorage.app",
+  messagingSenderId: "172530553636",
+  appId: "1:172530553636:web:f4fb295c3830cb1d1d99b1"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+const STATUS = {   // status text on a request -> [what the user sees, chip colour]
+  pending: ["Sending to the robot...", ""],
+  queued: ["In the queue", ""],
+  going_to_sender: ["Robot is on its way to the sender", ""],
+  wait_shipped: ["Robot is at the sender", "warn"],
+  going_to_destination: ["Robot is carrying the parcel to the receiver", ""],
+  wait_received: ["Robot has arrived at the receiver", "warn"],
+  delivered: ["Delivered", "ok"],
+  failed: ["Delivery failed", "bad"],
+  rejected: ["Request rejected", "bad"],
+};
+
+const meSel = document.getElementById("me"), toSel = document.getElementById("to");
+const sendBtn = document.getElementById("send"), msgEl = document.getElementById("msg");
+let requests = {}, robot = null, offset = 0, lastStatus = {};
+
+function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+function fillSelect(sel, items, selected) {
+  sel.innerHTML = "";
+  items.forEach((t, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = t.name + " (" + t.cabin.replace("_", " ") + ")";
+    sel.appendChild(o);
+  });
+  if (selected !== null && selected < items.length) sel.value = selected;
+}
+function me() { return TEACHERS[+meSel.value]; }
+function refreshTo() {
+  const others = TEACHERS.filter((t, i) => i !== +meSel.value);
+  fillSelect(toSel, others, 0);
+  toSel._items = others;
+}
+const saved = load("me");
+fillSelect(meSel, TEACHERS, saved !== null ? +saved : 0);
+refreshTo();
+meSel.onchange = () => { store("me", meSel.value); refreshTo(); render(); };
+
+sendBtn.onclick = () => {
+  const to = toSel._items[+toSel.value];
+  sendBtn.disabled = true;
+  db.ref("requests").push({
+    sender: me().cabin, destination: to.cabin,
+    senderName: me().name, receiverName: to.name,
+    status: "pending", detail: "", created: firebase.database.ServerValue.TIMESTAMP
+  }).then(() => { msgEl.textContent = "Request sent."; })
+    .catch(e => { msgEl.textContent = "Could not send: " + e.message; })
+    .finally(() => { setTimeout(() => { sendBtn.disabled = false; msgEl.textContent = ""; }, 2500); });
+};
+
+function press(id, field) {
+  db.ref("requests/" + id + "/" + field).set(true);
+}
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(); o.frequency.value = 880; o.connect(ctx.destination);
+    o.start(); setTimeout(() => { o.stop(); ctx.close(); }, 350);
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  } catch (e) {}
+}
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function render() {
+  const mine = me().cabin, list = document.getElementById("list");
+  const ids = Object.keys(requests).filter(id => {
+    const r = requests[id];
+    return r && (r.sender === mine || r.destination === mine);
+  }).sort().reverse().slice(0, 8);
+  list.innerHTML = "";
+  if (!ids.length) { list.className = "muted"; list.textContent = "Nothing yet."; return; }
+  list.className = "";
+  ids.forEach(id => {
+    const r = requests[id], card = el("div", "req");
+    card.appendChild(el("div", "route", (r.senderName || r.sender) + " → " + (r.receiverName || r.destination)));
+    const s = STATUS[r.status] || [r.status, ""];
+    card.appendChild(el("span", "chip " + s[1], s[0]));
+    if (r.status === "wait_shipped" && r.sender === mine && !r.shipped) {
+      card.appendChild(el("div", "alert", "The robot is at your cabin. Put the parcel in the box, then press OK shipped."));
+      const b = el("button", "big", "OK shipped"); b.onclick = () => { b.disabled = true; press(id, "shipped"); };
+      card.appendChild(b);
+    } else if (r.status === "wait_received" && r.destination === mine && !r.received) {
+      card.appendChild(el("div", "alert", "The robot has arrived at your cabin. Take the parcel, then press Received."));
+      const b = el("button", "big", "Received"); b.onclick = () => { b.disabled = true; press(id, "received"); };
+      card.appendChild(b);
+    } else if (r.status === "failed" || r.status === "rejected") {
+      card.appendChild(el("div", "muted", r.detail || ""));
+    } else if (r.status === "delivered") {
+      card.appendChild(el("div", "muted", "The robot is returning to its home spot."));
+    }
+    list.appendChild(card);
+    // Beep when it is this person's turn (also the first time they see it), and when their parcel is
+    // delivered or a delivery fails. The memory is kept per person AND per request, so switching the
+    // "Who are you?" name in one browser behaves like two phones.
+    const key = mine + ":" + id, seen = key in lastStatus;
+    const act = (r.status === "wait_shipped" && r.sender === mine) || (r.status === "wait_received" && r.destination === mine);
+    const done = (r.status === "delivered" && r.sender === mine) || r.status === "failed";
+    if (lastStatus[key] !== r.status && (act || (done && seen))) beep();
+    lastStatus[key] = r.status;
+  });
+}
+
+function renderRobot() {
+  const dot = document.getElementById("dot"), txt = document.getElementById("robotText");
+  const online = robot && robot.heartbeat && (Date.now() + offset - robot.heartbeat) < 20000;
+  dot.className = "dot " + (online ? "on" : "off");
+  if (!robot) { txt.textContent = "No robot information yet."; return; }
+  txt.textContent = online ? (robot.detail || robot.state) : "Robot system is offline.";
+}
+
+db.ref(".info/serverTimeOffset").on("value", s => { offset = s.val() || 0; renderRobot(); });
+db.ref("robot").on("value", s => { robot = s.val(); renderRobot(); });
+db.ref("requests").limitToLast(50).on("value", s => { requests = s.val() || {}; render(); });
+setInterval(renderRobot, 5000);
+</script>
+</body>
+</html>

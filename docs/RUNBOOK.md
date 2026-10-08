@@ -49,6 +49,17 @@ Queue tested OK: a request sent while a job is running waits, and starts by itse
 
 Steps 11/12 use repeated sends (5 times, 2 per second) because single `--once` messages were lost once on the loaded laptop (extra copies are ignored by the manager). Typing the words "OK shipped" in a terminal does nothing.
 
+## A2. Website (Firebase) on top of the simulation  (tested OK 2026-10-08)
+Replaces steps 9 to 12 above (no `ros2 topic pub` buttons). Needs internet. Firebase project `delivery-robot-demo`, Realtime Database in test mode (open; 30 days from 2026-10-08, then the rules must be updated).
+After steps 1 to 8 (sim ... delivery manager, with the REAL locations file), in order:
+1. Bridge (only after the manager says `Ready at home`):
+   `python3 src/my_bot/scripts/firebase_bridge.py`
+   Prints `Bridge started` and, for each website request, `Request <id> forwarded`. Buttons are forwarded only while the manager waits for that very request.
+2. Web server for a local preview (own terminal): `cd ~/dev_ws/src/my_bot/web && python3 -m http.server 8000`, then open `localhost:8000` in Firefox.
+3. In the page: pick "Who are you?" and "Send to", press **Request delivery**. When the robot reaches the sender the card shows **OK shipped**; at the receiver (switch "Who are you?" to the receiver, or use another phone) it shows **Received**. The robot card turns green while the bridge is alive.
+Notes: names are edited in the `TEACHERS` list at the top of `web/index.html`. A request left `pending` in the database is picked up when the bridge starts. On bridge start, half-finished requests are marked failed. Requests are never forwarded twice (the manager remembers website ids). Hosting for phones on cell data: not done yet (`firebase.json`, `.firebaserc` are ready; deploy with `npx firebase-tools` from `src/my_bot`).
+Observed: several Nav2 goals abort once or twice (status 6) and succeed on a retry; cause not investigated.
+
 ## B. Teleop / recording positions (optional)
 - Teleop (slow it down with `x`/`c`, `k` stops):
   `ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_key`
@@ -68,9 +79,14 @@ Same topics as above. Tested OK: queue order, rejected requests, shipped/receive
 - Each wait for a person times out after 600 s (`wait_shipped_timeout`, `wait_received_timeout`), then the robot returns home.
 - Parameters: `locations_file`, `home_name`, `dry_run`, `max_nav_retries`, the two timeouts (set with `-p name:=value`).
 
+## Failure handling tested (sim, 2026-10-08, with a temporary far-away `cabin_X`)
+- Impossible drop-off (A -> X) and impossible pickup (X -> D): 3 attempts (a bad goal took about 41 s to abort the first time), then `FAILED job N`, return home, back to IDLE. About 80 to 120 s per failed job.
+- KNOWN LIMITATION (not tested, not fixed): if Nav2 dies mid-trip the manager waits forever (no per-leg time limit). Recovery: restart Nav2 and the manager. Fix idea: a `nav_timeout` per leg that cancels the goal and counts as a failure. Revisit before a live demo.
+- The parcel stays on board after a FAILED job: the website must tell someone to unload it.
+
 ## Shutdown
 `k` in teleop, then Ctrl-C in this order: delivery manager, status viewer, Nav2, localisation, teleop, RViz, sim.
 Then `killall -q gzserver gzclient rviz2`, check `ps aux | grep -E "ros2|gzserver|rviz2|amcl" | grep -v grep` is empty, `rm -f /dev/shm/fastrtps_*`.
 
-## Not committed yet (by decision, 2026-10-08)
-`docs/`, `scripts/`, `config/locations.yaml` are uncommitted on purpose. Commit milestones: (1) simulation delivery works end to end, (2) Firebase linked in simulation, (3) real robot.
+## Commit milestones (decision 2026-10-08)
+(1) simulation delivery works end to end: DONE, commit 017e5ae; (2) Firebase linked in simulation; (3) real robot. The Pi has not pulled these yet.
