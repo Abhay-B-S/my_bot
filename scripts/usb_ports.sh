@@ -7,7 +7,7 @@ for dev in /dev/ttyUSB* /dev/ttyACM*; do
     info=$(udevadm info -q property -n "$dev" 2>/dev/null)
     id=$(echo "$info" | grep -E "^ID_VENDOR_ID=" | cut -d= -f2):$(echo "$info" | grep -E "^ID_MODEL_ID=" | cut -d= -f2)
     # the USB device name is the first path component after "usbN/" that looks like 1-1.4
-    sock=$(udevadm info -q path -n "$dev" | grep -oE "[0-9]+-[0-9]+(\.[0-9]+)*" | head -1)
+    sock=$(udevadm info -q path -n "$dev" | tr '/' '\n' | grep -E "^[0-9]+-[0-9]+(\.[0-9]+)*$" | tail -1)
     links=$(echo "$info" | grep -E "^DEVLINKS=" | cut -d= -f2 | tr ' ' '\n' | grep -E "/dev/(arduino|ydlidar|servo_nano)" | tr '\n' ' ')
     printf "%-14s usb id %-10s socket (KERNELS) %-8s names: %s\n" "$dev" "$id" "$sock" "${links:-none}"
 done

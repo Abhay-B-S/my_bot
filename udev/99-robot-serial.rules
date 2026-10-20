@@ -6,9 +6,10 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="y
 # The Arduino Uno clone (motors) and the Arduino Nano clone (servos) use the SAME chip (WCH CH340, 1a86:7523)
 # and have NO serial number, so they can only be told apart by the USB SOCKET they are plugged into.
 # The Nano's socket is named below (KERNELS value). Find the right name with:  bash scripts/usb_ports.sh
-# Order matters: the Nano rule comes first and stops further rules for that device ("last_rule").
+# The Nano rule marks the device (IS_SERVO_NANO=1); the Uno rule skips marked devices.
+# (OPTIONS+="last_rule" does NOT work on this system's udev, so it is not used.)
 #
-# Arduino Nano clone (servos)               -> /dev/servo_nano  (ONLY in the socket named here)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="1-1.4", SYMLINK+="servo_nano", GROUP="dialout", MODE="0660", OPTIONS+="last_rule"
-# Arduino Uno clone (motors)                -> /dev/arduino     (any other socket)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="arduino", GROUP="dialout", MODE="0660"
+# Arduino Nano clone (servos)  -> /dev/servo_nano   (ONLY in the socket named here; 1-1.4 on 2026-10-20)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="1-1.4", ENV{IS_SERVO_NANO}="1", SYMLINK+="servo_nano", GROUP="dialout", MODE="0660"
+# Arduino Uno clone (motors)   -> /dev/arduino      (any other socket)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ENV{IS_SERVO_NANO}!="1", SYMLINK+="arduino", GROUP="dialout", MODE="0660"
