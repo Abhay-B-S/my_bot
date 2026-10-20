@@ -18,11 +18,11 @@ cd ~/dev_ws && source /opt/ros/foxy/setup.bash && source install/setup.bash
 - Never run sim and real robot together; never run slam_toolbox and AMCL together (see `RUNBOOK_NAV2_SLAM.md`).
 - Close Firefox / WhatsApp web first; laptop overloads easily (lost `/odom`, stalled sim, Nav2 crashes).
 - Start the sim, close its window, wait 30 s, check `/odom`, THEN start the rest.
-- Stop ROS commands with Ctrl-C, not `timeout`/kill -9. If everything goes silent: stop all, `rm -f /dev/shm/fastrtps_*`, restart.
+- Stop ROS commands with Ctrl-C, not `timeout`/kill -9. If everything goes silent: stop all, `rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*`, restart.
 - Teach AMCL the start pose accurately (laser arcs on the obstacle edges) before sending any delivery.
 
 ## A. Simulation, step by step
-1. Clean start: `killall -q gzserver gzclient rviz2` then `rm -f /dev/shm/fastrtps_*` (only if nothing ROS is running).
+1. Clean start: `killall -q gzserver gzclient rviz2` then `rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*` (only if nothing ROS is running).
 2. Sim (wait for `Configured and started diff_cont`):
    `ros2 launch my_bot launch_sim.launch.py world:=./src/my_bot/worlds/obstacles.world`
 3. `killall gzclient` (closes the Gazebo window), wait 30 s.
@@ -93,6 +93,13 @@ Laptop, in this order:
 Quick stops: power switch; or Ctrl-C in the Nav2 terminal (the robot stops within about 0.5 s).
 The practice-house spots (`config/locations_real.yaml`) and map (`maps/practice_room.*`) are NOT in git; the real staffroom needs its own map and spots. Not yet done: a single start script for all of this.
 
+## A6. Cargo box: lid servo + lock servo (written 2026-10-20, hardware not yet on the robot)
+Parts: an Arduino Nano running `firmware/servo_nano/servo_nano.ino` (upload from the Arduino IDE; Board Arduino Nano, Processor ATmega328P, Port /dev/ttyUSBx; if the IDE says permission denied, start it with `sg dialout -c ~/Downloads/arduino-1.8.19/arduino` or log out and in after `sudo usermod -aG dialout $USER`). Servo 0 (pin D9) = lid, servo 1 (pin D10) = lock. Serial 57600, commands `s <n> <angle>`, `g <n>`, `d <n>`, `?`. Power the servos from their OWN 5 V supply (2 A or more, a 470 uF capacitor across it), with its GND joined to the Nano's GND; only the Nano's USB goes to the Pi.
+Pi side: `scripts/cargo_controller.py` (topics `/cargo_cmd` = `lock` / `unlock`, `/cargo_state` = `locked` / `unlocked` / `moving` / `error: ...`). Angles live in `config/cargo.yaml` (placeholders until calibrated). The delivery manager uses it with `-p cargo_lock:=true` (off by default): unlock on arrival at a person, lock (and wait for the confirmation, 10 s at most) before every drive.
+IMPORTANT udev: the Nano and the motor Uno are both CH340 1a86:7523 without serial numbers, so they are told apart only by the USB socket. `udev/99-robot-serial.rules` names the Nano's socket (`KERNELS=="1-1.4"`): find the real socket with `bash scripts/usb_ports.sh` on the Pi, edit the rule, then `sudo cp udev/99-robot-serial.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger` (ask first, needs sudo). Check `ls -l /dev/arduino /dev/servo_nano` afterwards. Never plug the Nano into the Pi before this rule is installed, or `/dev/arduino` may point at the Nano.
+Calibration (box built, servos powered): use `python3 scripts/servo_test.py <port> <angle> <servo>` or the Serial Monitor. Lid: find `closed` and `open` (5 degree steps, a few degrees of margin). Lock: find `unlocked` and `locked` (about 90 degrees apart), the arm must sit firmly over the hook with the lid closed. Write the numbers in `config/cargo.yaml`, then set `lid.enabled: true`. Test with `ros2 topic pub --once /cargo_cmd std_msgs/String "{data: unlock}"` (and `lock`).
+Mechanics: let the hook take the pull (a slot or catch in the frame), not the servo gears; keep the lid light and put the lid servo's lever close to the hinge (an SG90 is only about 1.5 kg cm); closing is slow (1 degree per 12 ms), keep fingers out of the gap. At controller start-up the lid jumps to "closed" at once.
+
 ## B. Teleop / recording positions (optional)
 - Teleop (slow it down with `x`/`c`, `k` stops):
   `ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_key`
@@ -119,7 +126,7 @@ Same topics as above. Tested OK: queue order, rejected requests, shipped/receive
 
 ## Shutdown
 `k` in teleop, then Ctrl-C in this order: delivery manager, status viewer, Nav2, localisation, teleop, RViz, sim.
-Then `killall -q gzserver gzclient rviz2`, check `ps aux | grep -E "ros2|gzserver|rviz2|amcl" | grep -v grep` is empty, `rm -f /dev/shm/fastrtps_*`.
+Then `killall -q gzserver gzclient rviz2`, check `ps aux | grep -E "ros2|gzserver|rviz2|amcl" | grep -v grep` is empty, `rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*`.
 
 ## Commit milestones (decision 2026-10-08)
 (1) simulation delivery works end to end: DONE, commit 017e5ae; (2) Firebase linked in simulation; (3) real robot. The Pi has not pulled these yet.

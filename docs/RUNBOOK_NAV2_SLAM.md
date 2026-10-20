@@ -18,7 +18,7 @@ cd ~/dev_ws && source /opt/ros/foxy/setup.bash && source install/setup.bash
 - Start the sim, **wait ~30 s**, then start the rest. Set the 2D Pose Estimate **before** starting Nav2.
 - `ros2 daemon stop; ros2 daemon start` fixes a stale "Node not found".
 - Check nodes with `ros2 node list` (not `pgrep`).
-- If the sim suddenly stops publishing (`/clock`, `/odom`, `/scan` silent, even `/rosout`) after ROS tools were killed abruptly: stop everything, then `rm -f /dev/shm/fastrtps_*` (stale Fast DDS shared-memory files; only when no ROS program is running) and restart. Avoid `timeout` on ROS commands; stop them with Ctrl-C.
+- If the sim suddenly stops publishing (`/clock`, `/odom`, `/scan` silent, even `/rosout`) after ROS tools were killed abruptly: stop everything, then `rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*` (stale Fast DDS shared-memory files; only when no ROS program is running) and restart. Avoid `timeout` on ROS commands; stop them with Ctrl-C.
 - The 2D Pose Estimate must match the laser: red scan arcs should sit on the obstacle edges. If they are off, click again, or turn the robot slowly in place. Drive slowly (teleop `x`/`c` until about speed 0.2, turn 0.5): fast turns make AMCL lose the robot.
 
 ## A. Simulation (laptop only)
@@ -61,6 +61,13 @@ Laptop terminals (no sim time):
    RViz: Fixed Frame `map`, **2D Pose Estimate** where the robot really is.
 6. Nav2: `ros2 launch my_bot navigation_launch.py use_sim_time:=false map_subscribe_transient_local:=true`
 7. Teleop (low speed: press `x` several times; `k` stops): same command as in A.5
+
+## Troubleshooting: the motors do not turn (found 2026-10-17)
+Symptom: the Arduino answers `OK` to `o 150 150` and the wheel counters read `0 0`, or the motor only vibrates; a new driver and a new Arduino change nothing; the Pi logs USB over-current on all ports and the Arduino drops off USB.
+Cause found: **no common ground between the motor driver and the Arduino.** One wire from the driver's GND to an Arduino GND pin fixed it. Check this FIRST (multimeter in continuity mode between the Arduino GND and the driver GND screw: it must beep).
+Other checks, in order: driver power LED and battery under load; the two enable pins (12, 13, or the ENA/ENB jumpers); the signal wires on pins 5, 6, 9, 10; the buck converter holds its voltage when the motors start; no 5 V wire between the driver and the Arduino (the Arduino is powered by USB only).
+Direct test without ROS (on the Pi, controller stopped, wheels off the floor): `python3 ~/motor_raw_test.py 150 0 20` (left only), `0 150 20` (right only). The script is `scripts/motor_raw_test.py` (copy it to the Pi's home folder). Or `python3 -m serial.tools.miniterm -e --eol CR /dev/arduino 57600` and type `e`, `o 150 0`, `o 0 150`, `r`. The firmware stops the motors 2 s after the last command.
+Pi power health: `vcgencmd get_throttled` (0x0 = no under-voltage) and `dmesg | grep -i over-current`.
 
 ## Shutdown
 `k` in teleop, Ctrl-C each terminal (Nav2, twist_mux, SLAM/AMCL, RViz, then the two Pi terminals), then

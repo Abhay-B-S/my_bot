@@ -1,0 +1,24 @@
+# Cargo box servos (driven by the Arduino Nano running firmware/servo_nano, connected to the Pi by USB).
+# ALL ANGLES BELOW ARE PLACEHOLDERS: calibrate them on the finished box (docs/RUNBOOK.md, "Cargo box").
+# Servo numbers are the Nano's: servo 0 = pin D9, servo 1 = pin D10, servo 2 = pin D11.
+#
+# Sequence used by scripts/cargo_controller.py:
+#   unlock = lock arm moves away from the hook, THEN the lid opens
+#   lock   = lid closes, short pause, THEN the lock arm turns about 90 degrees over the hook
+
+# PHASE 1 (now): only the LID servo is used ("unlock" = open the lid, "lock" = close it).
+# PHASE 2 (later): also switch the lock servo on (enabled: true below) once its hook is built.
+
+lid:                  # servo that opens and closes the cardboard lid
+  enabled: true       # calibrate the two angles below first (servo_test.py), the numbers here are placeholders
+  servo: 0
+  closed: 10          # lid shut
+  open: 100           # lid open (keep a few degrees away from where it hits something)
+
+lock:                 # servo whose arm turns about 90 degrees to clamp onto the hook on the lid
+  enabled: false      # phase 2
+  servo: 1
+  locked: 30          # arm over the hook: the lid cannot be pulled open
+  unlocked: 120       # arm clear of the hook (about 90 degrees from "locked")
+
+settle_seconds: 1.0   # pause between the lid reaching "closed" and the lock turning (lets the lid finish closing)

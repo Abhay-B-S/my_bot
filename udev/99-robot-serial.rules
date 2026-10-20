@@ -1,6 +1,14 @@
 # Stable device names for the robot (install: sudo cp to /etc/udev/rules.d/ then reload).
-# Match on USB vendor/product so the names do not depend on plug-in order or USB port.
-# YDLIDAR X2 adapter (Silicon Labs CP2102)  -> /dev/ydlidar
+#
+# YDLIDAR X2 adapter (Silicon Labs CP2102)  -> /dev/ydlidar     (matched by USB vendor/product)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="ydlidar", GROUP="dialout", MODE="0660"
-# Arduino Uno clone (WCH CH340)              -> /dev/arduino
+
+# The Arduino Uno clone (motors) and the Arduino Nano clone (servos) use the SAME chip (WCH CH340, 1a86:7523)
+# and have NO serial number, so they can only be told apart by the USB SOCKET they are plugged into.
+# The Nano's socket is named below (KERNELS value). Find the right name with:  bash scripts/usb_ports.sh
+# Order matters: the Nano rule comes first and stops further rules for that device ("last_rule").
+#
+# Arduino Nano clone (servos)               -> /dev/servo_nano  (ONLY in the socket named here)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", KERNELS=="1-1.4", SYMLINK+="servo_nano", GROUP="dialout", MODE="0660", OPTIONS+="last_rule"
+# Arduino Uno clone (motors)                -> /dev/arduino     (any other socket)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="arduino", GROUP="dialout", MODE="0660"

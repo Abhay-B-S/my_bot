@@ -51,6 +51,8 @@ class DeliveryManager(Node):
         self.declare_parameter('wait_received_timeout', 600.0)  # seconds
         self.declare_parameter('max_nav_retries', 2)
         self.declare_parameter('nav_timeout', 180.0)          # seconds allowed for one leg (per attempt)
+        self.declare_parameter('cargo_lock', False)           # True = use the parcel-box lock (cargo_controller on the Pi)
+        self.declare_parameter('cargo_lock_timeout', 10.0)    # seconds to wait for "locked" before driving anyway
 
         path = os.path.normpath(self.get_parameter('locations_file').value)
         with open(path) as f:
@@ -72,6 +74,15 @@ class DeliveryManager(Node):
         status_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                 reliability=ReliabilityPolicy.RELIABLE)
         self.status_pub = self.create_publisher(String, '/delivery_status', status_qos)
+
+        # optional parcel-box lock: unlock when the robot reaches a person, lock before every drive
+        self.cargo_enabled = self.get_parameter('cargo_lock').value
+        self.cargo_state = 'unknown'
+        self.lock_deadline = 0.0
+        if self.cargo_enabled:
+            self.cargo_pub = self.create_publisher(String, '/cargo_cmd', 10)
+            self.create_subscription(String, '/cargo_state', self._on_cargo_state, status_qos)
+            self.get_logger().info('Cargo lock ENABLED (needs cargo_controller running)')
 
         self.state = IDLE
         self.queue = deque()
@@ -145,10 +156,36 @@ class DeliveryManager(Node):
                       result='delivered')
         self._go(self.home)
 
+    # ---------- parcel-box lock ----------
+    def _on_cargo_state(self, msg):
+        self.cargo_state = msg.data
+
+    def _cargo(self, cmd):
+        """Ask the cargo controller to lock or unlock the box (no-op when the lock is not enabled)."""
+        if not self.cargo_enabled:
+            return
+        self.cargo_state = 'pending'          # until the controller reports the real state
+        if cmd == 'lock':
+            self.lock_deadline = time.monotonic() + self.get_parameter('cargo_lock_timeout').value
+        self.cargo_pub.publish(String(data=cmd))
+        self.get_logger().info('Cargo box: %s' % cmd)
+
+    def _cargo_ready(self, now):
+        """True when it is safe to drive: the box is locked (or the lock is off / did not answer in time)."""
+        if not self.cargo_enabled or self.cargo_state == 'locked':
+            return True
+        if now > self.lock_deadline:
+            self.get_logger().warn('Box lock not confirmed within %.0f s (state: %s): driving anyway'
+                                   % (self.get_parameter('cargo_lock_timeout').value, self.cargo_state))
+            return True
+        return False
+
     # ---------- driving ----------
     def _go(self, name):
         self.want_goal = name
         self.retries = 0
+        if self.cargo_enabled and self.cargo_state != 'locked':
+            self._cargo('lock')               # always lock before leaving a person (and at the start of a job)
 
     def _pose(self, name):
         p = self.locations[name]
@@ -248,10 +285,12 @@ class DeliveryManager(Node):
             self.state = WAIT_SHIPPED
             self.deadline = time.monotonic() + self.get_parameter('wait_shipped_timeout').value
             self._publish('At %s. Waiting for "OK shipped".' % self.job['sender'])
+            self._cargo('unlock')             # the sender can now put the parcel in
         elif self.state == TO_DROPOFF:
             self.state = WAIT_RECEIVED
             self.deadline = time.monotonic() + self.get_parameter('wait_received_timeout').value
             self._publish('At %s. Waiting for "received".' % self.job['destination'])
+            self._cargo('unlock')             # the receiver can now take it out
         elif self.state == RETURNING:
             self.state = IDLE
             self.job = None
@@ -270,7 +309,7 @@ class DeliveryManager(Node):
             self._watch_goal(now)
 
         # send a wanted goal as soon as Nav2 is ready
-        if self.want_goal and not self.navigating:
+        if self.want_goal and not self.navigating and self._cargo_ready(now):
             if self.dry_run or self.client.server_is_ready():
                 name, self.want_goal = self.want_goal, None
                 self._send_goal(name)
