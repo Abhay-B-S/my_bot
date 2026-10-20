@@ -37,6 +37,9 @@ class SimLink:
         time.sleep(0.4)
         return True, 'OK %d' % angle
 
+    def release(self, servo):
+        return True, 'OK'
+
     def close(self):
         pass
 
@@ -58,6 +61,17 @@ class NanoLink:
                 return True, line
             if line.startswith('ERR'):
                 return False, line
+        return False, 'no answer from the Nano'
+
+    def release(self, servo):
+        """Tell the servo to stop holding (it goes limp and draws no current)."""
+        self.ser.reset_input_buffer()
+        self.ser.write(('d %d\n' % servo).encode())
+        end = time.time() + 2.0
+        while time.time() < end:
+            line = self.ser.readline().decode(errors='ignore').strip()
+            if line.startswith('OK'):
+                return True, line
         return False, 'no answer from the Nano'
 
     def close(self):
@@ -140,24 +154,30 @@ class CargoController(Node):
         return None
 
     # ---------- the actions ----------
-    def _move(self, name, angle_key):
+    def _move(self, name, angle_key, release_key=None):
+        """Move one servo, then (if the config says so) let go of it, so only one servo draws current at a time."""
         part = self.cfg.get(name, {})
         if not part.get('enabled', False):
             return True
         ok, reply = self.link.move(int(part['servo']), int(part[angle_key]))
         if not ok:
             self.get_logger().error('%s servo: %s' % (name, reply))
+            return False
+        if release_key and part.get(release_key, False):
+            ok, reply = self.link.release(int(part['servo']))
+            if not ok:
+                self.get_logger().error('%s servo release: %s' % (name, reply))
         return ok
 
     def _do(self, cmd):
         self._set_state('moving')
         if cmd == 'unlock':
-            ok = self._move('lock', 'unlocked') and self._move('lid', 'open')
+            ok = self._move('lock', 'unlocked', 'release_after_move') and self._move('lid', 'open', 'release_when_open')
         else:
-            ok = self._move('lid', 'closed')
+            ok = self._move('lid', 'closed', 'release_when_closed')
             if ok:
                 time.sleep(float(self.cfg.get('settle_seconds', 0.6)))
-                ok = self._move('lock', 'locked')
+                ok = self._move('lock', 'locked', 'release_after_move')
         self._set_state(('unlocked' if cmd == 'unlock' else 'locked') if ok else 'error: servo did not answer')
         return ok
 

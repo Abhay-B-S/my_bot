@@ -14,11 +14,18 @@ lid:                  # servo that opens and closes the cardboard lid
   servo: 0
   closed: 10          # lid shut
   open: 100           # lid open (keep a few degrees away from where it hits something)
+  release_when_closed: true    # let the servo go limp once the lid is shut (saves current; the lid rests by itself)
+  release_when_open: false     # keep holding the lid open while a person loads or unloads the box
 
 lock:                 # servo whose arm turns about 90 degrees to clamp onto the hook on the lid
   enabled: false      # phase 2
   servo: 1
   locked: 30          # arm over the hook: the lid cannot be pulled open
   unlocked: 120       # arm clear of the hook (about 90 degrees from "locked")
+  release_after_move: true     # let go after moving: the hook holds mechanically, and only one servo draws current at a time
 
 settle_seconds: 1.0   # pause between the lid reaching "closed" and the lock turning (lets the lid finish closing)
+
+# Why servos are released: both servos together drew more than the Nano's USB power could supply (the Nano dropped
+# off USB on 2026-10-20). Moving ONE servo at a time and releasing it afterwards worked with no drops. A separate
+# 5 V supply for the servos (common ground with the Nano) is still the proper fix.
