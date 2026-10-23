@@ -113,20 +113,20 @@ controller_server:
       debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.26
+      max_vel_x: 0.20   # heavy delivery body 2026-10-23 (was 0.26)
       max_vel_y: 0.0
-      max_vel_theta: 1.0
+      max_vel_theta: 0.6   # heavy delivery body 2026-10-23 (was 1.0)
       min_speed_xy: 0.0
-      max_speed_xy: 0.26
+      max_speed_xy: 0.20   # heavy delivery body 2026-10-23 (was 0.26)
       min_speed_theta: 0.0
       # Add high threshold velocity for turtlebot 3 issue.
       # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
-      acc_lim_x: 2.5
+      acc_lim_x: 0.8   # heavy delivery body 2026-10-23 (was 2.5)
       acc_lim_y: 0.0
-      acc_lim_theta: 3.2
-      decel_lim_x: -2.5
+      acc_lim_theta: 1.2   # heavy delivery body 2026-10-23 (was 3.2)
+      decel_lim_x: -0.8   # heavy delivery body 2026-10-23 (was -2.5)
       decel_lim_y: 0.0
-      decel_lim_theta: -3.2
+      decel_lim_theta: -1.2   # heavy delivery body 2026-10-23 (was -3.2)
       vx_samples: 20
       vy_samples: 5
       vtheta_samples: 20
@@ -280,9 +280,9 @@ recoveries_server:
     transform_timeout: 0.1
     use_sim_time: true
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
+    max_rotational_vel: 0.6   # heavy delivery body 2026-10-23 (was 1.0)
     min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    rotational_acc_lim: 1.2   # heavy delivery body 2026-10-23 (was 3.2)
 
 robot_state_publisher:
   ros__parameters:
