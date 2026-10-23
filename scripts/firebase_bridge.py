@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Bridge between the Firebase Realtime Database (the website) and the delivery manager.
 
-Only Python's standard library is used: Firebase is read and written with plain web requests
-(its REST interface), so nothing has to be installed and no key file is needed.
+Firebase is read and written with plain web requests (its REST interface, Python's standard library),
+so no Firebase package has to be installed and no key file is needed.
 
 Database layout (see web/index.html for the writer side):
   /requests/<id>  {sender, destination, senderName, receiverName, status, detail, shipped, received, created,
                    lidSender, lidReceiver}
   /robot          {state, detail, queue, ref, lid, lidButtons, heartbeat}      written by this bridge
+  /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
+  /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
+                  when -p map_yaml:=<map .yaml> is given (the website draws the map, the spots and the robot)
 
 Flow:
   website writes a request with status 'pending'   -> bridge publishes "sender,destination,<id>" on /delivery_request
@@ -20,8 +23,15 @@ Login: the bridge signs in as robot@example.com; its password is read from ~/.de
 (a private file outside the repo). Fallback to the old open database: --ros-args -p use_auth:=false
 
 Run:  python3 src/my_bot/scripts/firebase_bridge.py [--ros-args -p database_url:=https://...]
+Live map on the website (same map and spots as Nav2 and the delivery manager):
+      python3 src/my_bot/scripts/firebase_bridge.py --ros-args -p map_yaml:=./maps/<name>.yaml \
+          -p locations_file:=./src/my_bot/config/locations_real.yaml
+(the map picture needs the Python imaging library PIL, which the laptop has; without it only the position is sent)
 """
+import base64
+import io
 import json
+import math
 import os
 import queue
 import re
@@ -32,8 +42,11 @@ import urllib.parse
 import urllib.request
 
 import rclpy
+import yaml
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import Empty, String
+from tf2_ros import Buffer, TransformListener
 
 DEFAULT_DB = 'https://delivery-robot-demo-default-rtdb.asia-southeast1.firebasedatabase.app'
 API_KEY = 'AIzaSyByOIQUag5MRhQiflwGldqNYPJGWaO-QTo'      # public web key of the project (not a secret)
@@ -57,6 +70,10 @@ class FirebaseBridge(Node):
         self.declare_parameter('use_auth', True)           # False = old open database (fallback)
         self.declare_parameter('robot_email', 'robot@example.com')
         self.declare_parameter('password_file', '~/.delivery_robot_password')
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.declare_parameter('map_yaml', '')              # map to show on the website ('' = none)
+        self.declare_parameter('locations_file', os.path.join(here, '..', 'config', 'locations.yaml'))
+        self.declare_parameter('pose_period', 1.0)          # seconds between position checks
         self.db = self.get_parameter('database_url').value.rstrip('/')
         self.poll_period = self.get_parameter('poll_period').value
         self.heartbeat_period = self.get_parameter('heartbeat_period').value
@@ -86,6 +103,17 @@ class FirebaseBridge(Node):
         self.net_ok = None
         self.first_poll = True
         self.running = True
+
+        # live position: robot pose on the map from TF, sent when it changed (or every 10 s as a keep-alive)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.last_pose = None
+        self.last_pose_sent = 0.0
+        self.create_timer(self.get_parameter('pose_period').value, self._send_pose)
+        map_body = self._map_body()
+        if map_body:
+            self.out.put(('PUT', 'map', map_body, None))
+
         threading.Thread(target=self._poll_loop, daemon=True).start()
         threading.Thread(target=self._writer_loop, daemon=True).start()
         self.get_logger().info('Bridge started, database: %s' % self.db)
@@ -248,6 +276,67 @@ class FirebaseBridge(Node):
             if status and self.written.get(ref) != status and self.written.get(ref) not in FINAL:
                 self._queue_patch(ref, status, st.get('detail', ''))
         self.out.put(('PUT', 'robot', self._robot_body(), None))
+
+    # ---------- live map ----------
+    def _map_body(self):
+        """The map picture (cropped to the explored part), its scale and position, and the spots, for /map."""
+        yaml_path = self.get_parameter('map_yaml').value
+        if not yaml_path:
+            return None
+        try:
+            from PIL import Image
+            yaml_path = os.path.expanduser(yaml_path)
+            with open(yaml_path) as f:
+                meta = yaml.safe_load(f)
+            img_path = meta['image']
+            if not os.path.isabs(img_path):
+                img_path = os.path.join(os.path.dirname(os.path.abspath(yaml_path)), img_path)
+            res, (ox, oy) = float(meta['resolution']), meta['origin'][:2]
+            img = Image.open(img_path).convert('L')
+            w, h = img.size
+            px = img.load()
+            # map_server colours: 0 = wall, 254 = free floor, 205 = unknown. Keep the explored part plus a margin.
+            known = [(x, y) for y in range(h) for x in range(w) if px[x, y] != 205]
+            if not known:
+                raise ValueError('the map has no explored area')
+            m = 10
+            x0, x1 = max(min(p[0] for p in known) - m, 0), min(max(p[0] for p in known) + m + 1, w)
+            y0, y1 = max(min(p[1] for p in known) - m, 0), min(max(p[1] for p in known) + m + 1, h)
+            crop = img.crop((x0, y0, x1, y1)).point(lambda v: 40 if v < 100 else 255 if v > 250 else 225)
+            buf = io.BytesIO()
+            crop.save(buf, format='PNG', optimize=True)
+            spots = {}
+            loc_path = os.path.normpath(os.path.expanduser(self.get_parameter('locations_file').value))
+            with open(loc_path) as f:
+                for name, p in (yaml.safe_load(f).get('locations') or {}).items():
+                    spots[name] = {'x': round(float(p['x']), 3), 'y': round(float(p['y']), 3)}
+            body = {'png': base64.b64encode(buf.getvalue()).decode(), 'resolution': res,
+                    'originX': ox + x0 * res, 'originY': oy + (h - y1) * res,   # bottom-left corner of the crop
+                    'width': x1 - x0, 'height': y1 - y0, 'spots': spots,
+                    'name': os.path.basename(yaml_path), 'updated': {'.sv': 'timestamp'}}
+            self.get_logger().info('Map %s (%dx%d, %d bytes) and %d spots will be shown on the website'
+                                   % (body['name'], body['width'], body['height'], len(buf.getvalue()), len(spots)))
+            return body
+        except Exception as exc:                       # no PIL, missing file, ...: the rest still works
+            self.get_logger().warn('Map not sent to the website (%s)' % exc)
+            return None
+
+    def _send_pose(self):
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_link', Time())
+        except Exception:
+            return                                     # not localised yet (no map frame)
+        tr, q = t.transform.translation, t.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        pose = (round(tr.x, 3), round(tr.y, 3), round(yaw, 3))
+        now = time.monotonic()
+        last = self.last_pose
+        moved = last is None or math.hypot(pose[0] - last[0], pose[1] - last[1]) > 0.02 or \
+            abs(math.atan2(math.sin(pose[2] - last[2]), math.cos(pose[2] - last[2]))) > 0.05
+        if moved or now - self.last_pose_sent > 10.0:
+            self.last_pose, self.last_pose_sent = pose, now
+            self.out.put(('PUT', 'pose', {'x': pose[0], 'y': pose[1], 'yaw': pose[2],
+                                          't': {'.sv': 'timestamp'}}, None))
 
     def _robot_body(self):
         with self.lock:

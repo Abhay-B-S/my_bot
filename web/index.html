@@ -62,6 +62,9 @@
   /* the robot is waiting for this person: the page pulses orange (1 s cycle, gentle enough to be safe) */
   @keyframes callme { 0%, 100% { background: var(--bg); } 50% { background: #ff9f1c; } }
   body.flash { animation: callme 1s ease-in-out infinite; }
+  /* live map */
+  #mapCanvas { display: block; margin: 0 auto; border-radius: 10px; border: 1px solid var(--line); }
+  #mapText { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -86,6 +89,7 @@
       <div><strong id="robotName">Robot</strong><div id="robotText" class="muted">Connecting...</div></div>
     </div>
 
+
     <div class="card">
       <div class="row">
         <div><strong id="whoName"></strong><div id="whoCabin" class="muted"></div></div>
@@ -102,6 +106,12 @@
     <div class="card">
       <h2>My deliveries</h2>
       <div id="list" class="muted">Nothing yet.</div>
+    </div>
+    <!-- Live map: shown when the robot system has sent its map -->
+    <div class="card hidden" id="mapCard">
+      <h2>Where is the robot</h2>
+      <canvas id="mapCanvas"></canvas>
+      <div id="mapText" class="muted"></div>
     </div>
   </div>
 
@@ -160,6 +170,7 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
 
 const $ = id => document.getElementById(id);
 let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, unsub = [];
+let mapInfo = null, mapImg = null, pose = null;
 
 function cabinLabel(c) { return c.replace("_", " "); }
 function el(tag, cls, text) {
@@ -200,6 +211,7 @@ $("logout").onclick = () => auth.signOut();
 auth.onAuthStateChanged(user => {
   unsub.forEach(f => f()); unsub = [];
   requests = {}; robot = null; lastStatus = {};
+  mapInfo = null; mapImg = null; pose = null; $("mapCard").classList.add("hidden");
   if (!user) { current = null; show(false); return; }
   const id = (user.email || "").replace(EMAIL_DOMAIN, "");
   current = TEACHERS.find(t => t.id === id) || null;
@@ -217,6 +229,8 @@ auth.onAuthStateChanged(user => {
   $("to")._items = others;
   listen(db.ref("robot"), s => { robot = s.val(); renderRobot(); render(); });   // render: lid state
   listen(db.ref("requests").limitToLast(50), s => { requests = s.val() || {}; render(); });
+  listen(db.ref("map"), s => { mapInfo = s.val(); loadMapImage(); });
+  listen(db.ref("pose"), s => { pose = s.val(); drawMap(); });
 });
 
 function listen(ref, cb) {
@@ -352,8 +366,74 @@ function lidSteps(card, id, opened, lidField, doneField, task, doneLabel) {
   card.appendChild(b);
 }
 
+// ---------- live map ----------
+function loadMapImage() {
+  mapImg = null;
+  if (!mapInfo || !mapInfo.png) { drawMap(); return; }
+  const img = new Image();
+  img.onload = () => { mapImg = img; drawMap(); };
+  img.src = "data:image/png;base64," + mapInfo.png;
+}
+
+function spotLabel(name) {
+  if (name === "home") return "Home";
+  const t = TEACHERS.find(p => p.cabin === name);
+  return cabinLabel(name).replace("cabin ", "") + (t ? " · " + t.name.split(" ")[0] : "");
+}
+
+function drawMap() {
+  const card = $("mapCard"), cv = $("mapCanvas");
+  if (!current || !mapInfo || !mapImg) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  // size: as wide as the card, at most 420 px high
+  let s = (card.clientWidth - 30) / mapInfo.width;
+  if (mapInfo.height * s > 420) s = 420 / mapInfo.height;
+  const w = mapInfo.width * s, h = mapInfo.height * s, dpr = window.devicePixelRatio || 1;
+  cv.style.width = w + "px"; cv.style.height = h + "px";
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(mapImg, 0, 0, w, h);
+  const res = mapInfo.resolution;
+  const toPx = (x, y) => [(x - mapInfo.originX) / res * s, h - (y - mapInfo.originY) / res * s];
+
+  // spots: the current job's pickup (orange) and destination (green) stand out
+  const job = robot && robot.ref ? requests[robot.ref] : null;
+  ctx.font = "600 11px system-ui, sans-serif"; ctx.textBaseline = "middle";
+  Object.entries(mapInfo.spots || {}).forEach(([name, p]) => {
+    const [x, y] = toPx(p.x, p.y);
+    const c = job && name === job.sender ? "#e8590c" : job && name === job.destination ? col("--ok") : "#5d6677";
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, 5, 0, 2 * Math.PI); ctx.fill();
+    const label = spotLabel(name), tw = ctx.measureText(label).width;
+    const lx = Math.min(Math.max(x + 8, 2), w - tw - 6);
+    ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fillRect(lx - 3, y - 8, tw + 6, 16);
+    ctx.fillStyle = c; ctx.fillText(label, lx, y);
+  });
+
+  // the robot: a dot with a line showing which way it faces; grey when the position is old
+  const now = Date.now() + offset;
+  const online = robot && robot.heartbeat && now - robot.heartbeat < 20000;
+  const fresh = pose && typeof pose.t === "number" && now - pose.t < 15000 && online;
+  if (pose) {
+    const [x, y] = toPx(pose.x, pose.y), r = Math.max(7, 0.16 / res * s);
+    const c = fresh ? "#1a56db" : "#9aa4b8";
+    ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(pose.yaw) * r * 1.9, y - Math.sin(pose.yaw) * r * 1.9); ctx.stroke();
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill();
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
+  }
+  $("mapText").textContent = !pose ? "Robot position not known yet."
+    : fresh ? "Live position" + (job ? " · orange = pickup, green = destination" : "")
+    : "Last known position (the robot system is offline or not localised).";
+}
+window.addEventListener("resize", drawMap);
+setInterval(drawMap, 5000);   // grey out an old position
+
 function render() {
   updateFlash();
+  drawMap();
   if (!current) return;
   const mine = current.cabin, list = $("list");
   const ids = Object.keys(requests).filter(id => {

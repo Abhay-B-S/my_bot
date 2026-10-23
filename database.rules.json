@@ -14,6 +14,16 @@
       ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
     },
 
+    "pose": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
+    },
+
+    "map": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
+    },
+
     "requests": {
       ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
       "$id": {
