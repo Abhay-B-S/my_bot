@@ -10,6 +10,8 @@ Topics:
   out: /cargo_state  std_msgs/String   "unknown", "moving", "locked", "unlocked" or "error: ..."   (latched)
 
 "unlock" = lock servo to its unlocked angle, then (if a lid servo is enabled) open the lid.
+The lid can be lifted by TWO servos together (config lid.servo2 = 1, lid.servo2_mirror for a mirror-image mount):
+both move one degree at a time with the firmware's "p" command (servos 0 and 1 only).
 "lock"   = (if a lid servo is enabled) close the lid, wait, then lock servo to its locked angle.
 At start-up the box is locked (fail-safe), unless -p lock_on_start:=false.
 Angles come from config/cargo.yaml (placeholders until calibrated on the finished box).
@@ -37,6 +39,10 @@ class SimLink:
         time.sleep(0.4)
         return True, 'OK %d' % angle
 
+    def move_both(self, a0, a1):
+        time.sleep(0.4)
+        return True, 'OK %d %d' % (a0, a1)
+
     def release(self, servo):
         return True, 'OK'
 
@@ -55,6 +61,19 @@ class NanoLink:
         self.ser.reset_input_buffer()
         self.ser.write(('s %d %d\n' % (servo, angle)).encode())
         end = time.time() + 6.0                      # a full sweep takes about 2 s
+        while time.time() < end:
+            line = self.ser.readline().decode(errors='ignore').strip()
+            if line.startswith('OK'):
+                return True, line
+            if line.startswith('ERR'):
+                return False, line
+        return False, 'no answer from the Nano'
+
+    def move_both(self, a0, a1):
+        """Move servo 0 and servo 1 together (firmware 'p' command)."""
+        self.ser.reset_input_buffer()
+        self.ser.write(('p %d %d\n' % (a0, a1)).encode())
+        end = time.time() + 10.0
         while time.time() < end:
             line = self.ser.readline().decode(errors='ignore').strip()
             if line.startswith('OK'):
@@ -159,14 +178,23 @@ class CargoController(Node):
         part = self.cfg.get(name, {})
         if not part.get('enabled', False):
             return True
-        ok, reply = self.link.move(int(part['servo']), int(part[angle_key]))
+        angle = int(part[angle_key])
+        servos = [int(part['servo'])]
+        if part.get('servo2') is not None:               # two servos lift together (servos 0 and 1)
+            servos.append(int(part['servo2']))
+            a2 = 180 - angle if part.get('servo2_mirror', False) else angle
+            a0, a1 = (angle, a2) if servos[0] == 0 else (a2, angle)
+            ok, reply = self.link.move_both(a0, a1)
+        else:
+            ok, reply = self.link.move(servos[0], angle)
         if not ok:
             self.get_logger().error('%s servo: %s' % (name, reply))
             return False
         if release_key and part.get(release_key, False):
-            ok, reply = self.link.release(int(part['servo']))
-            if not ok:
-                self.get_logger().error('%s servo release: %s' % (name, reply))
+            for n in servos:
+                ok, reply = self.link.release(n)
+                if not ok:
+                    self.get_logger().error('%s servo %d release: %s' % (name, n, reply))
         return ok
 
     def _do(self, cmd):

@@ -8,7 +8,7 @@ and the motors could keep running for a minute. This program notices that and st
 It trips when
   - a wheel reading changes impossibly fast (default > 30 rad/s; the motors manage ~15 at full power)
     = the Arduino restarted, or
-  - a drive command is active but neither wheel reading changes for 3 s
+  - a real drive command (>= 0.08 m/s or 0.3 rad/s) is active but neither wheel reading changes for 5 s
     = the Arduino stopped answering, or a wheel is stalled or jammed.
 Then it ends the motor controller process (ros2_control_node), so no more commands reach the Arduino, opens
 /dev/arduino itself and sends stop commands (opening the port also restarts the Arduino into a stopped state),
@@ -37,7 +37,9 @@ class SafetyWatchdog(Node):
     def __init__(self):
         super().__init__('safety_watchdog')
         self.declare_parameter('max_wheel_speed', 30.0)     # rad/s; above this the reading is not physical
-        self.declare_parameter('frozen_seconds', 3.0)       # commanded but no wheel movement for this long
+        self.declare_parameter('frozen_seconds', 5.0)       # commanded but no wheel movement for this long
+        self.declare_parameter('min_cmd_linear', 0.08)      # m/s: smaller commands may not move the heavy robot at all,
+        self.declare_parameter('min_cmd_angular', 0.3)      # rad/s  so they do not count as "driving" (2026-10-23)
         self.declare_parameter('cmd_timeout', 0.6)          # a drive command counts as active this long
         self.declare_parameter('port', '/dev/arduino')
         self.declare_parameter('dry_run', False)
@@ -63,7 +65,8 @@ class SafetyWatchdog(Node):
 
     # ---------- inputs ----------
     def _on_cmd(self, msg):
-        moving = abs(msg.linear.x) > 0.02 or abs(msg.angular.z) > 0.1
+        moving = (abs(msg.linear.x) >= self.get_parameter('min_cmd_linear').value or
+                  abs(msg.angular.z) >= self.get_parameter('min_cmd_angular').value)
         now = time.monotonic()
         if moving:
             if self.cmd_since is None or now > self.cmd_active_until:

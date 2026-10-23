@@ -7,6 +7,7 @@
 At the prompt (servo 0 = lid on D9, servo 1 = lock on D10, servo 2 = D11):
   90            servo 0 to 90 degrees
   1 120         servo 1 to 120 degrees
+  p 90 90       servo 0 AND servo 1 together to 90 and 90 (two servos lifting one lid)
   g 1           ask which angle servo 1 was last sent
   d 1           let servo 1 go limp (stop holding)
   v 25          slower moves: 25 ms per degree (default 15; 3 = fast, 60 = very slow)
@@ -59,6 +60,9 @@ def main():
                 n = int(words[1]) if len(words) > 1 else 0
                 for a in (20, 160, 20):
                     print('  servo %d to %d -> %s' % (n, a, ask(ser, 's %d %d' % (n, a))))
+            elif words[0] == 'p':
+                print('  servos 0+1 to %d, %d -> %s' % (int(words[1]), int(words[2]),
+                                                       ask(ser, 'p %d %d' % (int(words[1]), int(words[2])))))
             elif words[0] == 'v':
                 print('  ->', ask(ser, 'v %d' % int(words[1])))
             elif words[0] in ('g', 'd'):
@@ -68,7 +72,7 @@ def main():
             else:
                 print('  servo %d to %d -> %s' % (int(words[0]), int(words[1]), ask(ser, 's %d %d' % (int(words[0]), int(words[1])))))
         except (ValueError, IndexError):
-            print('  type an angle (90), or: <servo> <angle>, v <ms>, g <servo>, d <servo>, sweep <servo>, q')
+            print('  type an angle (90), or: <servo> <angle>, p <a0> <a1>, v <ms>, g <servo>, d <servo>, sweep <servo>, q')
     ser.close()
 
 
