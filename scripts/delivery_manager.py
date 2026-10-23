@@ -39,7 +39,9 @@ from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.time import Time
 from std_msgs.msg import Empty, String
+from tf2_ros import Buffer, TransformListener
 
 # States of the state machine
 IDLE = 'IDLE'
@@ -65,6 +67,8 @@ class DeliveryManager(Node):
         self.declare_parameter('cargo_lock_timeout', 10.0)    # seconds to wait for "locked" before driving anyway
         self.declare_parameter('go_home_between_jobs', False)  # True = old behaviour: always return home first
         self.declare_parameter('lid_buttons', False)          # True = the person opens the lid from the website
+        self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
+                                                              # is really this close to the spot (0 = do not check)
 
         path = os.path.normpath(self.get_parameter('locations_file').value)
         with open(path) as f:
@@ -79,6 +83,8 @@ class DeliveryManager(Node):
             ', '.join(self.locations), self.frame, '  [DRY RUN]' if self.dry_run else ''))
 
         self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.tf_buffer = Buffer()                 # the robot's real position, to double-check Nav2's "arrived"
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         self.create_subscription(String, '/delivery_request', self._on_request, 10)
         self.create_subscription(Empty, '/delivery_shipped', self._on_shipped, 10)
         self.create_subscription(Empty, '/delivery_received', self._on_received, 10)
@@ -290,9 +296,25 @@ class DeliveryManager(Node):
         self.navigating = False
         self.goal_handle = None
         if status == GoalStatus.STATUS_SUCCEEDED:
+            off = self._distance_to(self._current_target())
+            if off is not None and off > self.get_parameter('arrival_check').value > 0:
+                # seen 2026-10-23: Foxy reported a new goal reached at once while the robot was elsewhere
+                self._nav_failed('Nav2 said "arrived" but the robot is %.2f m from %s' % (off, self._current_target()))
+                return
             self._arrived()
         else:
             self._nav_failed('Nav2 finished with status %d' % status)
+
+    def _distance_to(self, name):
+        """Distance (m) from the robot's real map position to a spot, or None when unknown (dry run, no TF)."""
+        if self.dry_run:
+            return None
+        try:
+            t = self.tf_buffer.lookup_transform(self.frame, 'base_link', Time()).transform.translation
+        except Exception:
+            return None
+        p = self.locations[name]
+        return math.hypot(float(p['x']) - t.x, float(p['y']) - t.y)
 
     def _watch_goal(self, now):
         """Safety nets for a goal whose result never arrives."""

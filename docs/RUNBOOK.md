@@ -93,6 +93,23 @@ Laptop, in this order:
 Quick stops: power switch; or Ctrl-C in the Nav2 terminal (the robot stops within about 0.5 s).
 The practice-house spots (`config/locations_real.yaml`) and map (`maps/practice_room.*`) are NOT in git; the real staffroom needs its own map and spots. Not yet done: a single start script for all of this.
 
+## A5b. REAL ROBOT with the new delivery body  (tested 2026-10-23 in a friend's room: deliveries from phones, incl. two requests in a row)
+**Never drive backward (`,` in teleop).** Stopping after reversing (sometimes also after turning) can restart the motor Arduino; the motors then run on their own. Nav2 never reverses in this setup. Keep the motor battery switch within reach. Open hardware fix: secure the Dupont jumpers, 10 kOhm pull-downs on IN1-IN4/ENA/ENB, 1000 uF on the 12 V input, 100 nF across each motor.
+
+Pi (one command; survives a dropped SSH link): lidar `ros2 launch my_bot ydlidar.launch.py` (as in B.2), then `~/start_robot.sh` = launch_robot + **safety watchdog** (`scripts/safety_watchdog.py`, copied to the Pi home). The watchdog ends the motor controller and sends a stop to the Arduino when a wheel reading jumps (> 30 rad/s = Arduino restart) or a drive command gets no wheel movement for 3 s; then restart `~/start_robot.sh`. Its log: `~/watchdog.log`.
+
+Laptop, in this order (same map and spots everywhere):
+1. `ros2 run twist_mux twist_mux --ros-args --params-file ./src/my_bot/config/twist_mux.yaml -r cmd_vel_out:=diff_cont/cmd_vel_unstamped`
+2. Mapping a new room: `ros2 launch slam_toolbox online_async_launch.py params_file:=./src/my_bot/config/mapper_params_mapping.yaml use_sim_time:=false`, drive slowly (teleop on `/cmd_vel_key`, `z` until speed ~0.14), then save with the two service calls in RUNBOOK_NAV2_SLAM.md B.5 and stop slam.
+3. Localisation: `ros2 launch my_bot localization_launch.py map:=./maps/<room>.yaml use_sim_time:=false`, RViz 2D Pose Estimate.
+4. Spots: `python3 src/my_bot/scripts/record_location.py home --file src/my_bot/config/locations_<room>.yaml` (and cabin_A..D), then `python3 src/my_bot/scripts/check_locations.py maps/<room>.yaml src/my_bot/config/locations_<room>.yaml` (needs >= 0.45 m clearance: the back end swings 0.29 m around the axle).
+5. Nav2: `ros2 launch my_bot navigation_launch.py use_sim_time:=false map_subscribe_transient_local:=true` (wait for "Managed nodes are active"; if it hangs at "Configuring controller_server", stop it and start again).
+6. Manager: `python3 src/my_bot/scripts/delivery_manager.py --ros-args -p locations_file:=./src/my_bot/config/locations_<room>.yaml`
+7. Bridge with the live map: `python3 src/my_bot/scripts/firebase_bridge.py --ros-args -p map_yaml:=./maps/<room>.yaml -p locations_file:=./src/my_bot/config/locations_<room>.yaml`
+Check that the request reaches the manager: `ros2 topic info /delivery_request` must show 1 publisher and 1 subscription (once the manager started but never connected; restarting manager and bridge fixed it).
+
+Fixed 2026-10-23: Foxy's goal checker with `stateful: True` declared a new goal reached at once (the robot "arrived home" while still at cabin C); now `stateful: False`, and the manager only believes "arrived" when the robot is within `arrival_check` (0.5 m) of the spot, else it retries.
+
 ## A6. Cargo box: lid servo + lock servo (written 2026-10-20, hardware not yet on the robot)
 Parts: an Arduino Nano running `firmware/servo_nano/servo_nano.ino` (upload from the Arduino IDE; Board Arduino Nano, Processor ATmega328P, Port /dev/ttyUSBx; if the IDE says permission denied, start it with `sg dialout -c ~/Downloads/arduino-1.8.19/arduino` or log out and in after `sudo usermod -aG dialout $USER`). Servo 0 (pin D9) = lid, servo 1 (pin D10) = lock. Serial 57600, commands `s <n> <angle>`, `g <n>`, `d <n>`, `?`. Power the servos from their OWN 5 V supply (2 A or more, a 470 uF capacitor across it), with its GND joined to the Nano's GND; only the Nano's USB goes to the Pi.
 Pi side: `scripts/cargo_controller.py` (topics `/cargo_cmd` = `lock` / `unlock`, `/cargo_state` = `locked` / `unlocked` / `moving` / `error: ...`). Angles live in `config/cargo.yaml` (placeholders until calibrated). The delivery manager uses it with `-p cargo_lock:=true` (off by default): unlock on arrival at a person, lock (and wait for the confirmation, 10 s at most) before every drive.

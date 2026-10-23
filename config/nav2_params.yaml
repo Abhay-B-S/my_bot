@@ -106,7 +106,7 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
-      stateful: True
+      stateful: False   # 2026-10-23 - True made Foxy declare a NEW goal reached at once (the remembered "position reached" was not cleared)
     # DWB parameters
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -137,7 +137,7 @@ controller_server:
       xy_goal_tolerance: 0.25
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: True
-      stateful: True
+      stateful: False   # 2026-10-23 - True made Foxy declare a NEW goal reached at once (the remembered "position reached" was not cleared)
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
