@@ -2,4 +2,12 @@ controller_manager:
   ros__parameters:
     use_sim_time: true
 
- 
+# SIMULATION ONLY (loaded after my_controllers.yaml by the Gazebo plugin, so it overrides it).
+# The real robot's speed/acceleration limits (my_controllers.yaml, 2026-10-23) stop Foxy's diff_drive_controller
+# from publishing odometry in Gazebo (sim clock); Nav2 limits its own speeds anyway.
+diff_cont:
+  ros__parameters:
+    linear.x.has_velocity_limits: false
+    linear.x.has_acceleration_limits: false
+    angular.z.has_velocity_limits: false
+    angular.z.has_acceleration_limits: false

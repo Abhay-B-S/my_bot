@@ -139,6 +139,15 @@ Same topics as above. Tested OK: queue order, rejected requests, shipped/receive
 - No trip home between jobs (2026-10-23): when a job ends and another is waiting, the robot drives straight from where it is to the next sender; a job that arrives while it is on its way home turns it around. `-p go_home_between_jobs:=true` restores the old "always home first" behaviour (for comparisons). Dry-run test, 3 jobs (fake 3 s trips): 3rd parcel delivered at 30 s instead of 37 s (two trips home saved).
 - Parameters: `locations_file`, `home_name`, `dry_run`, `max_nav_retries`, `nav_timeout`, `cargo_lock`, `go_home_between_jobs`, the two timeouts (set with `-p name:=value`).
 
+## Self-recovery: the robot finds its position again (2026-10-23)
+"Kidnapped robot problem": the robot is picked up and put elsewhere, bumped, or localisation drifts; AMCL keeps believing the old position. Run on the LAPTOP next to Nav2 (needs /map, /scan, TF):
+`python3 src/my_bot/scripts/self_recovery.py` (no use_sim_time, also in the simulator), and start the manager with `-p self_recovery:=true`.
+- Detect: share of lidar points on map walls at the believed pose (normally 90-100 %); below 40 % for 3 s = lost -> `/localization_status` "lost"; the manager cancels the Nav2 goal and the website shows "Robot lost its position...".
+- Search (global scan matching): the current scan is tried at every free spot (20 cm grid, 24 directions), the 10 best are refined (5 cm, 2.5 deg); accepted when >= 75 % AND >= 5 points better than any other place; sent to AMCL as /initialpose; "recovered" after 3 good checks -> the manager continues to the same spot (or back to the cabin it was waiting at).
+- Unsure (similar-looking places or weak match): turns 60 deg via twist_mux input `cmd_vel_recovery` (priority 50: above Nav2, below the keyboard) and searches again, up to a full circle; never turns with anything within 0.33 m of the axle; then "help: ..." (2D Pose Estimate in RViz also ends it).
+- Tested in Gazebo (robot teleported mid-delivery with `gz model -m my_bot -x .. -y .. -Y ..`): noticed after 3.6-4.0 s, search 0.6 s, position error 6-7 cm, delivery completed. AMCL's own global localisation (first attempt) failed: 90 s of turning, 52 % match.
+- Simulator note: the real robot's diff_cont speed/acceleration limits stopped odometry in Gazebo; `config/gaz_ros2_ctl_use_sim.yaml` switches them off for the simulation only.
+
 ## Live robot position on the website (2026-10-23)
 Start the bridge with the SAME map and spots that Nav2 and the manager use:
 `python3 src/my_bot/scripts/firebase_bridge.py --ros-args -p map_yaml:=./maps/<room>.yaml -p locations_file:=./src/my_bot/config/locations_real.yaml`

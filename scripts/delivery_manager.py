@@ -20,6 +20,10 @@ Parcel box (needs cargo_controller.py running):
                                             "shipped"/"received" close it, and the robot never drives until the
                                             box reports "locked" (it keeps retrying and says so instead)
 
+Self-recovery (needs scripts/self_recovery.py running):  -p self_recovery:=true
+  on /localization_status "lost" the job is paused (Nav2 goal cancelled); on "recovered" the robot continues to the
+  same spot (or drives back to the cabin it was waiting at, if someone moved it); "help: ..." is shown on the website
+
 Run (sim, Nav2 already running):
   python3 src/my_bot/scripts/delivery_manager.py --ros-args -p use_sim_time:=true
 Test without Nav2:
@@ -67,6 +71,7 @@ class DeliveryManager(Node):
         self.declare_parameter('cargo_lock_timeout', 10.0)    # seconds to wait for "locked" before driving anyway
         self.declare_parameter('go_home_between_jobs', False)  # True = old behaviour: always return home first
         self.declare_parameter('lid_buttons', False)          # True = the person opens the lid from the website
+        self.declare_parameter('self_recovery', False)        # True = pause/resume on /localization_status
         self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
                                                               # is really this close to the spot (0 = do not check)
 
@@ -106,6 +111,12 @@ class DeliveryManager(Node):
         elif self.get_parameter('lid_buttons').value:
             self.get_logger().warn('lid_buttons needs cargo_lock:=true: ignoring it')
         self.create_subscription(Empty, '/delivery_open_lid', self._on_open_lid, 10)
+        self.recovery_enabled = self.get_parameter('self_recovery').value
+        self.lost = False                # self_recovery reported the position lost: no driving until recovered
+        self.resume_target = None        # where to go once the position is found again
+        if self.recovery_enabled:
+            self.create_subscription(String, '/localization_status', self._on_localization, status_qos)
+            self.get_logger().info('Self-recovery ENABLED (needs self_recovery.py running)')
 
         self.state = IDLE
         self.queue = deque()
@@ -191,6 +202,25 @@ class DeliveryManager(Node):
             self._go(self.home)      # the main loop cancels this if a job arrives on the way
 
     # ---------- parcel-box lock ----------
+    def _on_localization(self, msg):
+        text = msg.data
+        if text == 'lost' and not self.lost:
+            self.lost = True
+            if self.state in (TO_PICKUP, TO_DROPOFF, RETURNING, WAIT_SHIPPED, WAIT_RECEIVED):
+                self.resume_target = self._current_target()
+            self._abandon_goal()
+            self._publish('Robot lost its position (moved or bumped?). Finding it again...')
+        elif text in ('recovered', 'ok') and self.lost:     # 'ok' = a restarted self_recovery is localised
+            self.lost = False
+            target, self.resume_target = self.resume_target, None
+            if target:
+                self._publish('Position found again. Continuing to %s' % target)
+                self._go(target)
+            else:
+                self._publish('Position found again.')
+        elif text.startswith('help') and self.lost:
+            self._publish('Robot needs help: %s' % text.split(':', 1)[-1].strip())
+
     def _on_open_lid(self, _msg):
         if not self.lid_buttons:
             self.get_logger().warn('Ignoring "open lid": lid_buttons is off')
@@ -352,9 +382,9 @@ class DeliveryManager(Node):
         self._go(self.home)
 
     def _current_target(self):
-        if self.state == TO_PICKUP:
+        if self.state in (TO_PICKUP, WAIT_SHIPPED):
             return self.job['sender']
-        if self.state == TO_DROPOFF:
+        if self.state in (TO_DROPOFF, WAIT_RECEIVED):
             return self.job['destination']
         return self.home
 
@@ -398,7 +428,7 @@ class DeliveryManager(Node):
             self._watch_goal(now)
 
         # send a wanted goal as soon as Nav2 is ready
-        if self.want_goal and not self.navigating and self._cargo_ready(now):
+        if self.want_goal and not self.navigating and not self.lost and self._cargo_ready(now):
             if self.dry_run or self.client.server_is_ready():
                 name, self.want_goal = self.want_goal, None
                 self._send_goal(name)
@@ -415,7 +445,7 @@ class DeliveryManager(Node):
             self._go(self.home)
 
         # start the next job (first come, first served), not in the same instant as the previous status
-        if self.state == IDLE and self.queue and now - self.last_publish >= 1.0:
+        if self.state == IDLE and self.queue and not self.lost and now - self.last_publish >= 1.0:
             self.job = self.queue.popleft()
             self.state = TO_PICKUP
             self._publish('Starting job %d: %s -> %s'
