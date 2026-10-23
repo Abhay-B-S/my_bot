@@ -5,14 +5,16 @@ Only Python's standard library is used: Firebase is read and written with plain 
 (its REST interface), so nothing has to be installed and no key file is needed.
 
 Database layout (see web/index.html for the writer side):
-  /requests/<id>  {sender, destination, senderName, receiverName, status, detail, shipped, received, created}
-  /robot          {state, detail, queue, ref, heartbeat}      written by this bridge
+  /requests/<id>  {sender, destination, senderName, receiverName, status, detail, shipped, received, created,
+                   lidSender, lidReceiver}
+  /robot          {state, detail, queue, ref, lid, lidButtons, heartbeat}      written by this bridge
 
 Flow:
   website writes a request with status 'pending'   -> bridge publishes "sender,destination,<id>" on /delivery_request
   manager status (/delivery_status)                -> bridge updates /robot and the request's status
   website sets shipped/received = true             -> bridge publishes /delivery_shipped, /delivery_received
                                                       (only while the manager is waiting for that very request)
+  website sets lidSender/lidReceiver = true        -> bridge publishes /delivery_open_lid (same check)
 
 Login: the bridge signs in as robot@example.com; its password is read from ~/.delivery_robot_password
 (a private file outside the repo). Fallback to the old open database: --ros-args -p use_auth:=false
@@ -69,6 +71,7 @@ class FirebaseBridge(Node):
         self.request_pub = self.create_publisher(String, '/delivery_request', 10)
         self.shipped_pub = self.create_publisher(Empty, '/delivery_shipped', 10)
         self.received_pub = self.create_publisher(Empty, '/delivery_received', 10)
+        self.open_lid_pub = self.create_publisher(Empty, '/delivery_open_lid', 10)
         self.create_subscription(String, '/delivery_status', self._on_status, 10)
 
         self.lock = threading.Lock()
@@ -76,6 +79,8 @@ class FirebaseBridge(Node):
         self.forwarded = set()           # request ids already sent to the manager
         self.sent_shipped = set()
         self.sent_received = set()
+        self.sent_lid_sender = set()
+        self.sent_lid_receiver = set()
         self.written = {}                # request id -> last status we wrote
         self.out = queue.Queue()         # pending writes to Firebase
         self.net_ok = None
@@ -194,6 +199,11 @@ class FirebaseBridge(Node):
             status = r.get('status')
             if status == 'pending' and rid not in self.forwarded:
                 self._forward(rid, r)
+            # "Open lid" first, so presses reach the manager in the order people make them
+            if r.get('lidSender') is True and rid not in self.sent_lid_sender:
+                self._press('WAIT_SHIPPED', rid, self.open_lid_pub, self.sent_lid_sender)
+            if r.get('lidReceiver') is True and rid not in self.sent_lid_receiver:
+                self._press('WAIT_RECEIVED', rid, self.open_lid_pub, self.sent_lid_receiver)
             if r.get('shipped') is True and rid not in self.sent_shipped:
                 self._press('WAIT_SHIPPED', rid, self.shipped_pub, self.sent_shipped)
             if r.get('received') is True and rid not in self.sent_received:
@@ -244,6 +254,7 @@ class FirebaseBridge(Node):
             st = self.last_status or {}
         return {'state': st.get('state', 'UNKNOWN'), 'detail': st.get('detail', ''),
                 'queue': st.get('queue', 0), 'ref': st.get('ref'),
+                'lid': st.get('cargo'), 'lidButtons': bool(st.get('lid_buttons')),
                 'heartbeat': {'.sv': 'timestamp'}}
 
     def _writer_loop(self):

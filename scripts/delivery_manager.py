@@ -11,7 +11,14 @@ Topics (all plain ROS 2, so a website bridge can use them later):
   in : /delivery_request   std_msgs/String  "cabin_A,cabin_D"  (optional 3rd field = website id: "cabin_A,cabin_D,-Nabc")
   in : /delivery_shipped   std_msgs/Empty   sender has loaded the parcel
   in : /delivery_received  std_msgs/Empty   receiver has taken the parcel
-  out: /delivery_status    std_msgs/String  JSON: state, job, sender, destination, detail, queue
+  in : /delivery_open_lid  std_msgs/Empty   the person at the robot wants the lid open (lid_buttons mode)
+  out: /delivery_status    std_msgs/String  JSON: state, job, sender, destination, detail, queue, cargo, lid_buttons
+
+Parcel box (needs cargo_controller.py running):
+  -p cargo_lock:=true                       box opens by itself on arrival, closes before every drive
+  -p cargo_lock:=true -p lid_buttons:=true  box opens only when the person presses "Open lid" on the website;
+                                            "shipped"/"received" close it, and the robot never drives until the
+                                            box reports "locked" (it keeps retrying and says so instead)
 
 Run (sim, Nav2 already running):
   python3 src/my_bot/scripts/delivery_manager.py --ros-args -p use_sim_time:=true
@@ -57,6 +64,7 @@ class DeliveryManager(Node):
         self.declare_parameter('cargo_lock', False)           # True = use the parcel-box lock (cargo_controller on the Pi)
         self.declare_parameter('cargo_lock_timeout', 10.0)    # seconds to wait for "locked" before driving anyway
         self.declare_parameter('go_home_between_jobs', False)  # True = old behaviour: always return home first
+        self.declare_parameter('lid_buttons', False)          # True = the person opens the lid from the website
 
         path = os.path.normpath(self.get_parameter('locations_file').value)
         with open(path) as f:
@@ -81,12 +89,17 @@ class DeliveryManager(Node):
 
         # optional parcel-box lock: unlock when the robot reaches a person, lock before every drive
         self.cargo_enabled = self.get_parameter('cargo_lock').value
+        self.lid_buttons = self.cargo_enabled and self.get_parameter('lid_buttons').value
         self.cargo_state = 'unknown'
         self.lock_deadline = 0.0
         if self.cargo_enabled:
             self.cargo_pub = self.create_publisher(String, '/cargo_cmd', 10)
             self.create_subscription(String, '/cargo_state', self._on_cargo_state, status_qos)
-            self.get_logger().info('Cargo lock ENABLED (needs cargo_controller running)')
+            self.get_logger().info('Cargo lock ENABLED (needs cargo_controller running)%s'
+                                   % (', lid opened by the website buttons' if self.lid_buttons else ''))
+        elif self.get_parameter('lid_buttons').value:
+            self.get_logger().warn('lid_buttons needs cargo_lock:=true: ignoring it')
+        self.create_subscription(Empty, '/delivery_open_lid', self._on_open_lid, 10)
 
         self.state = IDLE
         self.queue = deque()
@@ -103,6 +116,7 @@ class DeliveryManager(Node):
         self.dry_until = 0.0
         self.last_wait_log = 0.0
         self.last_publish = 0.0    # time of the last status message (two in a row could be lost)
+        self.last_detail = ''      # repeated when only the box state changes
 
         self.create_timer(0.5, self._tick)
         self._publish('Ready at %s. Waiting for requests.' % self.home)
@@ -117,9 +131,12 @@ class DeliveryManager(Node):
                'sender': self.job['sender'] if self.job else None,
                'destination': self.job['destination'] if self.job else None,
                'detail': detail, 'queue': len(self.queue),
-               'result': result, 'rejected_ref': rejected_ref}
+               'result': result, 'rejected_ref': rejected_ref,
+               'cargo': self.cargo_state if self.cargo_enabled else None, 'lid_buttons': self.lid_buttons}
         self.status_pub.publish(String(data=json.dumps(msg)))
         self.last_publish = time.monotonic()
+        if result is None and rejected_ref is None:
+            self.last_detail = detail
         self.get_logger().info('[%s] %s' % (self.state, detail))
 
     # ---------- incoming messages ----------
@@ -168,8 +185,21 @@ class DeliveryManager(Node):
             self._go(self.home)      # the main loop cancels this if a job arrives on the way
 
     # ---------- parcel-box lock ----------
+    def _on_open_lid(self, _msg):
+        if not self.lid_buttons:
+            self.get_logger().warn('Ignoring "open lid": lid_buttons is off')
+            return
+        if self.state not in (WAIT_SHIPPED, WAIT_RECEIVED):
+            self.get_logger().warn('Ignoring "open lid": state is %s' % self.state)
+            return
+        self._cargo('unlock')
+
     def _on_cargo_state(self, msg):
+        changed = msg.data != self.cargo_state
         self.cargo_state = msg.data
+        # tell the website what the lid is doing while a person stands at the robot
+        if changed and self.lid_buttons and self.state in (WAIT_SHIPPED, WAIT_RECEIVED):
+            self._publish(self.last_detail)
 
     def _cargo(self, cmd):
         """Ask the cargo controller to lock or unlock the box (no-op when the lock is not enabled)."""
@@ -185,6 +215,11 @@ class DeliveryManager(Node):
         """True when it is safe to drive: the box is locked (or the lock is off / did not answer in time)."""
         if not self.cargo_enabled or self.cargo_state == 'locked':
             return True
+        if now > self.lock_deadline and self.lid_buttons:
+            # people open this lid, so never drive with it possibly open: say so and try again
+            self._publish('The lid did not close (box: %s). Trying again; check the box.' % self.cargo_state)
+            self._cargo('lock')
+            return False
         if now > self.lock_deadline:
             self.get_logger().warn('Box lock not confirmed within %.0f s (state: %s): driving anyway'
                                    % (self.get_parameter('cargo_lock_timeout').value, self.cargo_state))
@@ -306,12 +341,14 @@ class DeliveryManager(Node):
             self.state = WAIT_SHIPPED
             self.deadline = time.monotonic() + self.get_parameter('wait_shipped_timeout').value
             self._publish('At %s. Waiting for "OK shipped".' % self.job['sender'])
-            self._cargo('unlock')             # the sender can now put the parcel in
+            if not self.lid_buttons:
+                self._cargo('unlock')         # the sender can now put the parcel in
         elif self.state == TO_DROPOFF:
             self.state = WAIT_RECEIVED
             self.deadline = time.monotonic() + self.get_parameter('wait_received_timeout').value
             self._publish('At %s. Waiting for "received".' % self.job['destination'])
-            self._cargo('unlock')             # the receiver can now take it out
+            if not self.lid_buttons:
+                self._cargo('unlock')         # the receiver can now take it out
         elif self.state == RETURNING:
             self.state = IDLE
             self.job = None

@@ -215,7 +215,7 @@ auth.onAuthStateChanged(user => {
     const o = el("option", "", t.name + " (" + cabinLabel(t.cabin) + ")"); o.value = i; $("to").appendChild(o);
   });
   $("to")._items = others;
-  listen(db.ref("robot"), s => { robot = s.val(); renderRobot(); });
+  listen(db.ref("robot"), s => { robot = s.val(); renderRobot(); render(); });   // render: lid state
   listen(db.ref("requests").limitToLast(50), s => { requests = s.val() || {}; render(); });
 });
 
@@ -304,8 +304,9 @@ document.addEventListener("visibilitychange", () => {
 // remind every 15 s while the robot waits for this person
 function needsMe(r) {
   const mine = current && current.cabin;
-  return r && ((r.status === "wait_shipped" && r.sender === mine && !r.shipped) ||
-               (r.status === "wait_received" && r.destination === mine && !r.received));
+  // stops once the person has reacted (pressed Open lid, or the final button)
+  return r && ((r.status === "wait_shipped" && r.sender === mine && !r.shipped && !r.lidSender) ||
+               (r.status === "wait_received" && r.destination === mine && !r.received && !r.lidReceiver));
 }
 setInterval(() => { if (current && Object.values(requests).some(needsMe)) beep("arrive"); }, 15000);
 
@@ -325,6 +326,32 @@ function updateFlash() {
 }
 
 // ---------- display ----------
+// ---------- parcel box lid (when the robot runs with lid_buttons) ----------
+function lidMode() { return !!(robot && robot.lidButtons); }
+
+function lidText(lid) {
+  if (!lid || lid === "locked") return "The lid is closed.";
+  if (lid === "unlocked") return "The lid is open.";
+  if (lid === "moving" || lid === "pending") return "The lid is moving...";
+  if (lid.startsWith("error")) return "Problem with the box (" + lid + "). Open it by hand if needed.";
+  return "Lid: " + lid;
+}
+
+// step 1: "Open lid"; step 2: lid state + "Close lid & send" / "Close lid & done"
+function lidSteps(card, id, opened, lidField, doneField, task, doneLabel) {
+  if (!opened) {
+    card.appendChild(el("div", "alert", "The robot is at your cabin. Tap Open lid, " + task + ", then tap " + doneLabel + "."));
+    const b = el("button", "big", "Open lid"); b.onclick = () => { b.disabled = true; press(id, lidField); };
+    card.appendChild(b);
+    return;
+  }
+  const lid = robot.lid;
+  const text = lid === "locked" ? "Opening the lid..." : lidText(lid);   // pressed, the robot has not started yet
+  card.appendChild(el("div", "alert", text + (lid === "unlocked" ? " Please " + task + "." : "")));
+  const b = el("button", "big", doneLabel); b.onclick = () => { b.disabled = true; press(id, doneField); };
+  card.appendChild(b);
+}
+
 function render() {
   updateFlash();
   if (!current) return;
@@ -341,10 +368,14 @@ function render() {
     card.appendChild(el("div", "route", (r.senderName || r.sender) + " → " + (r.receiverName || r.destination)));
     const s = STATUS[r.status] || [r.status, ""];
     card.appendChild(el("span", "chip " + s[1], s[0]));
-    if (r.status === "wait_shipped" && r.sender === mine && !r.shipped) {
+    if (r.status === "wait_shipped" && r.sender === mine && !r.shipped && lidMode()) {
+      lidSteps(card, id, r.lidSender, "lidSender", "shipped", "put the parcel in", "Close lid & send");
+    } else if (r.status === "wait_shipped" && r.sender === mine && !r.shipped) {
       card.appendChild(el("div", "alert", "The robot is at your cabin. Put the parcel in the box, then press OK shipped."));
       const b = el("button", "big", "OK shipped"); b.onclick = () => { b.disabled = true; press(id, "shipped"); };
       card.appendChild(b);
+    } else if (r.status === "wait_received" && r.destination === mine && !r.received && lidMode()) {
+      lidSteps(card, id, r.lidReceiver, "lidReceiver", "received", "take the parcel out", "Close lid & done");
     } else if (r.status === "wait_received" && r.destination === mine && !r.received) {
       card.appendChild(el("div", "alert", "The robot has arrived at your cabin. Take the parcel, then press Received."));
       const b = el("button", "big", "Received"); b.onclick = () => { b.disabled = true; press(id, "received"); };
