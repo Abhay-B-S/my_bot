@@ -117,7 +117,11 @@ Same topics as above. Tested OK: queue order, rejected requests, shipped/receive
 - Jobs run one at a time, first come first served. Unknown names, sender = destination, or home as an endpoint are rejected (reason in status).
 - A failed Nav2 leg is retried twice (`max_nav_retries`); if it still fails the job is dropped and the robot returns home.
 - Each wait for a person times out after 600 s (`wait_shipped_timeout`, `wait_received_timeout`), then the robot returns home.
-- Parameters: `locations_file`, `home_name`, `dry_run`, `max_nav_retries`, the two timeouts (set with `-p name:=value`).
+- No trip home between jobs (2026-10-23): when a job ends and another is waiting, the robot drives straight from where it is to the next sender; a job that arrives while it is on its way home turns it around. `-p go_home_between_jobs:=true` restores the old "always home first" behaviour (for comparisons). Dry-run test, 3 jobs (fake 3 s trips): 3rd parcel delivered at 30 s instead of 37 s (two trips home saved).
+- Parameters: `locations_file`, `home_name`, `dry_run`, `max_nav_retries`, `nav_timeout`, `cargo_lock`, `go_home_between_jobs`, the two timeouts (set with `-p name:=value`).
+
+## Website sound (2026-10-23)
+Phones block sound until the page is tapped, so after login a "Turn on sound" card covers the page until it is tapped (it comes back if the phone mutes the page again). The page then keeps the screen awake, beeps three times when the robot reaches that person (and every 15 s until they press the button), and plays two tones when their parcel is delivered. While the robot waits for that person the whole page also pulses orange (1 s cycle) and the tab title alternates with "Robot is here!", until they press the button: this works on a phone in silent mode. The small "Sound on (tap to test)" link plays a test beep. The phone must stay on this page with the MEDIA volume up (Android ringer silent/vibrate usually still allows the beep; an iPhone's silent switch mutes it).
 
 ## Failure handling tested (sim, 2026-10-08, with a temporary far-away `cabin_X`)
 - Impossible drop-off (A -> X) and impossible pickup (X -> D): 3 attempts (a bad goal took about 41 s to abort the first time), then `FAILED job N`, return home, back to IDLE. About 80 to 120 s per failed job.

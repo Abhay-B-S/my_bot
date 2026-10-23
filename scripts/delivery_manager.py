@@ -3,6 +3,9 @@
 
 A job is "sender,destination" (names from config/locations.yaml). For each job the robot:
   home -> sender -> (waits for "shipped") -> destination -> (waits for "received") -> home
+If another job is already waiting when one ends, the robot does NOT go home first: it drives straight
+from where it is to the next sender (also when a new job arrives while it is on its way home).
+Set go_home_between_jobs:=true for the old behaviour (always home first), e.g. to compare the two.
 
 Topics (all plain ROS 2, so a website bridge can use them later):
   in : /delivery_request   std_msgs/String  "cabin_A,cabin_D"  (optional 3rd field = website id: "cabin_A,cabin_D,-Nabc")
@@ -53,6 +56,7 @@ class DeliveryManager(Node):
         self.declare_parameter('nav_timeout', 180.0)          # seconds allowed for one leg (per attempt)
         self.declare_parameter('cargo_lock', False)           # True = use the parcel-box lock (cargo_controller on the Pi)
         self.declare_parameter('cargo_lock_timeout', 10.0)    # seconds to wait for "locked" before driving anyway
+        self.declare_parameter('go_home_between_jobs', False)  # True = old behaviour: always return home first
 
         path = os.path.normpath(self.get_parameter('locations_file').value)
         with open(path) as f:
@@ -98,6 +102,7 @@ class DeliveryManager(Node):
         self.deadline = None
         self.dry_until = 0.0
         self.last_wait_log = 0.0
+        self.last_publish = 0.0    # time of the last status message (two in a row could be lost)
 
         self.create_timer(0.5, self._tick)
         self._publish('Ready at %s. Waiting for requests.' % self.home)
@@ -114,6 +119,7 @@ class DeliveryManager(Node):
                'detail': detail, 'queue': len(self.queue),
                'result': result, 'rejected_ref': rejected_ref}
         self.status_pub.publish(String(data=json.dumps(msg)))
+        self.last_publish = time.monotonic()
         self.get_logger().info('[%s] %s' % (self.state, detail))
 
     # ---------- incoming messages ----------
@@ -152,9 +158,14 @@ class DeliveryManager(Node):
             self.get_logger().warn('Ignoring "received": state is %s' % self.state)
             return
         self.state = RETURNING
-        self._publish('Delivered job %d. Returning to %s' % (self.job['id'], self.home),
-                      result='delivered')
-        self._go(self.home)
+        if self.queue and not self.get_parameter('go_home_between_jobs').value:
+            # no trip home: the main loop starts the waiting job in about a second, from right here
+            self._publish('Delivered job %d. Going straight to the next job (%d waiting)'
+                          % (self.job['id'], len(self.queue)), result='delivered')
+        else:
+            self._publish('Delivered job %d. Returning to %s' % (self.job['id'], self.home),
+                          result='delivered')
+            self._go(self.home)      # the main loop cancels this if a job arrives on the way
 
     # ---------- parcel-box lock ----------
     def _on_cargo_state(self, msg):
@@ -186,6 +197,16 @@ class DeliveryManager(Node):
         self.retries = 0
         if self.cargo_enabled and self.cargo_state != 'locked':
             self._cargo('lock')               # always lock before leaving a person (and at the start of a job)
+
+    def _abandon_goal(self):
+        """Forget the current leg (used when the robot skips its trip home for a waiting job)."""
+        self.want_goal = None
+        if self.navigating:
+            self.goal_gen += 1               # ignore the old goal's late callbacks
+            if self.goal_handle is not None:
+                self.goal_handle.cancel_goal_async()
+            self.navigating = False
+            self.goal_handle = None
 
     def _pose(self, name):
         p = self.locations[name]
@@ -300,6 +321,15 @@ class DeliveryManager(Node):
     def _tick(self):
         now = time.monotonic()
 
+        # a job is waiting while the robot heads home: skip the trip home and start the job from here.
+        # (at least 1 s after the last status, so the website surely got the previous job's result)
+        if (self.state == RETURNING and self.queue and now - self.last_publish >= 1.0
+                and not self.get_parameter('go_home_between_jobs').value):
+            self._abandon_goal()
+            self.state = IDLE
+            self.job = None
+            self.get_logger().info('Next job is waiting: not returning to %s' % self.home)
+
         # fake driving
         if self.dry_run and self.navigating and now >= self.dry_until:
             self.navigating = False
@@ -325,8 +355,8 @@ class DeliveryManager(Node):
                           % (what, self.job['id'], self.home), result='failed')
             self._go(self.home)
 
-        # start the next job (first come, first served)
-        if self.state == IDLE and self.queue:
+        # start the next job (first come, first served), not in the same instant as the previous status
+        if self.state == IDLE and self.queue and now - self.last_publish >= 1.0:
             self.job = self.queue.popleft()
             self.state = TO_PICKUP
             self._publish('Starting job %d: %s -> %s'

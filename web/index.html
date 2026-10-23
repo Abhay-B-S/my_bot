@@ -52,6 +52,16 @@
            margin-top: 10px; font-weight: 600; }
   .error { color: var(--bad); min-height: 1.3em; margin-top: 8px; font-size: .9rem; }
   #msg { min-height: 1.3em; margin-top: 8px; font-size: .9rem; }
+  /* sound: browsers only allow sound after a tap, so a full-screen card asks for one */
+  #soundGate { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex;
+               align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+  #soundGate.hidden { display: none; }
+  #soundGate .card { max-width: 420px; text-align: center; margin: 0; }
+  #soundGate .icon { font-size: 2.6rem; }
+  #soundState { margin-top: 10px; }
+  /* the robot is waiting for this person: the page pulses orange (1 s cycle, gentle enough to be safe) */
+  @keyframes callme { 0%, 100% { background: var(--bg); } 50% { background: #ff9f1c; } }
+  body.flash { animation: callme 1s ease-in-out infinite; }
 </style>
 </head>
 <body>
@@ -81,6 +91,7 @@
         <div><strong id="whoName"></strong><div id="whoCabin" class="muted"></div></div>
         <button id="logout" class="link" type="button">Log out</button>
       </div>
+      <button id="soundState" class="link" type="button">🔔 Sound on (tap to test)</button>
       <h2 style="margin-top:16px">Send a parcel</h2>
       <label for="to">Send to</label>
       <select id="to"></select>
@@ -91,6 +102,16 @@
     <div class="card">
       <h2>My deliveries</h2>
       <div id="list" class="muted">Nothing yet.</div>
+    </div>
+  </div>
+
+  <!-- Shown after login (and whenever the phone has muted the page) until the user taps the button -->
+  <div id="soundGate" class="hidden">
+    <div class="card">
+      <div class="icon">🔔</div>
+      <h2>Turn on sound</h2>
+      <p class="muted">The robot beeps this phone when it reaches your cabin. Keep this page open and the volume up.</p>
+      <button id="soundBtn" class="big" type="button">Turn on sound</button>
     </div>
   </div>
 </main>
@@ -150,6 +171,8 @@ function el(tag, cls, text) {
 function show(loggedIn) {
   $("login").classList.toggle("hidden", loggedIn);
   $("app").classList.toggle("hidden", !loggedIn);
+  checkSound();
+  updateFlash();
 }
 
 // ---------- login ----------
@@ -220,17 +243,90 @@ function press(id, field) {
     .catch(e => { $("msg").textContent = "Could not send: " + e.message; });
 }
 
-function beep() {
+// ---------- sound ----------
+// Browsers start a page muted: sound only works after the user has tapped something. One audio
+// "context" is unlocked by the tap on the Turn on sound card and then reused for every beep.
+let audio = null, wakeLock = null;
+
+function soundOn() { return audio && audio.state === "running"; }
+
+function checkSound() {        // show the card while someone is logged in and the sound is locked
+  const need = !!current && !soundOn();
+  $("soundGate").classList.toggle("hidden", !need);
+  $("soundState").textContent = soundOn() ? "🔔 Sound on (tap to test)" : "🔕 Sound off (tap to turn on)";
+}
+
+function unlockSound() {       // must run inside a tap
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator(); o.frequency.value = 880; o.connect(ctx.destination);
-    o.start(); setTimeout(() => { o.stop(); ctx.close(); }, 350);
-    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+    audio.resume().then(() => { beep("test"); checkSound(); });
   } catch (e) {}
+  keepAwake();
+  checkSound();
+}
+$("soundBtn").onclick = unlockSound;
+$("soundState").onclick = () => soundOn() ? beep("test") : unlockSound();
+
+// a beep pattern: "arrive" = three high beeps, "done" = two rising tones, "test" = one short beep
+function beep(kind) {
+  const pattern = { arrive: [[988, 0], [988, .3], [988, .6]], done: [[660, 0], [880, .25]], test: [[880, 0]] }[kind || "arrive"];
+  if (navigator.vibrate) navigator.vibrate(kind === "test" ? 100 : [300, 120, 300, 120, 300]);
+  if (!soundOn()) { checkSound(); return; }
+  try {
+    pattern.forEach(([freq, at]) => {
+      const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime + at;
+      o.type = "square"; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+      o.connect(g); g.connect(audio.destination);
+      o.start(t); o.stop(t + 0.25);
+    });
+  } catch (e) {}
+}
+
+// keep the screen on while the page is open, so the phone does not sleep and miss the robot
+function keepAwake() {
+  if (!("wakeLock" in navigator) || wakeLock) return;
+  navigator.wakeLock.request("screen").then(l => {
+    wakeLock = l; l.addEventListener("release", () => { wakeLock = null; });
+  }).catch(() => {});
+}
+
+// coming back to the page: the phone may have muted it and dropped the screen lock
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (audio && audio.state !== "running") audio.resume().catch(() => {}).finally(checkSound);
+  if (soundOn()) keepAwake();
+  checkSound();
+});
+
+// remind every 15 s while the robot waits for this person
+function needsMe(r) {
+  const mine = current && current.cabin;
+  return r && ((r.status === "wait_shipped" && r.sender === mine && !r.shipped) ||
+               (r.status === "wait_received" && r.destination === mine && !r.received));
+}
+setInterval(() => { if (current && Object.values(requests).some(needsMe)) beep("arrive"); }, 15000);
+
+// flash the page (and the tab title) while the robot waits for this person
+const TITLE = document.title;
+let titleTimer = null;
+function updateFlash() {
+  const on = !!current && Object.values(requests).some(needsMe);
+  document.body.classList.toggle("flash", on);
+  if (on && !titleTimer) {
+    titleTimer = setInterval(() => {
+      document.title = document.title === TITLE ? "🔔 Robot is here!" : TITLE;
+    }, 1000);
+  } else if (!on && titleTimer) {
+    clearInterval(titleTimer); titleTimer = null; document.title = TITLE;
+  }
 }
 
 // ---------- display ----------
 function render() {
+  updateFlash();
   if (!current) return;
   const mine = current.cabin, list = $("list");
   const ids = Object.keys(requests).filter(id => {
@@ -256,7 +352,7 @@ function render() {
     } else if (r.status === "failed" || r.status === "rejected") {
       card.appendChild(el("div", "muted", r.detail || ""));
     } else if (r.status === "delivered") {
-      card.appendChild(el("div", "muted", "The robot is returning to its home spot."));
+      card.appendChild(el("div", "muted", "Parcel delivered."));
     }
     list.appendChild(card);
     // Beep when it is this person's turn (also the first time they see it), and when their parcel is
@@ -264,7 +360,7 @@ function render() {
     const key = mine + ":" + id, seen = key in lastStatus;
     const act = (r.status === "wait_shipped" && r.sender === mine) || (r.status === "wait_received" && r.destination === mine);
     const done = (r.status === "delivered" && r.sender === mine) || r.status === "failed";
-    if (lastStatus[key] !== r.status && (act || (done && seen))) beep();
+    if (lastStatus[key] !== r.status && (act || (done && seen))) beep(act ? "arrive" : "done");
     lastStatus[key] = r.status;
   });
 }
