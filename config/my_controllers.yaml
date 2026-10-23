@@ -18,8 +18,8 @@ diff_cont:
 
     left_wheel_names: ['left_wheel_joint']
     right_wheel_names: ['right_wheel_joint']
-    wheel_separation: 0.225
-    wheel_radius: 0.034
+    wheel_separation: 0.288   # delivery body 2026-10-23, tyre centre to tyre centre (old robot 0.225)
+    wheel_radius: 0.034       # 70 mm wheels; 0.034 matched a 1 m tape test under load
 
     use_stamped_vel: false
    
@@ -27,7 +27,7 @@ diff_cont:
 
     # wheels_per_side: x
     # wheel_separation_multiplier: x
-    wheel_separation_multiplier: 1.055
+    wheel_separation_multiplier: 1.0   # old robot was calibrated to 1.055; recalibrate with a 360 degree turn test
     left_wheel_radius_multiplier: 1.0
     right_wheel_radius_multiplier: 1.0
     # i have uncommented above two lines

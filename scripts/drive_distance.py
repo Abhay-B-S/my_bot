@@ -22,7 +22,7 @@ import serial
 PORT = '/dev/arduino'
 BAUD = 57600
 COUNTS_PER_REV = 1024.0          # config/my_controllers + ros2_control.xacro (enc_counts_per_rev)
-WHEEL_RADIUS = 0.034             # metres, calibrated effective radius of the OLD wheels
+WHEEL_RADIUS = 0.034             # metres, effective radius (70 mm wheels: a 1 m tape test matched)
 M_PER_COUNT = 2 * math.pi * WHEEL_RADIUS / COUNTS_PER_REV
 NUDGE_M = 0.15
 NUDGE_POWER = 160               # raw motor power (0..255) used until the encoders have been proven

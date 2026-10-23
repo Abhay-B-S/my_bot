@@ -4,8 +4,10 @@
     <joint name="laser_joint" type="fixed">
         <parent link="chassis"/>
         <child link="laser_frame"/>
-        <origin xyz="0.058 0 0.103" rpy="0 0 0"/>
-        <!-- <origin xyz="0.058 0 0.103" rpy="0 0 0"/>  -->
+        <!-- on top of the delivery box, centred, 0.0455 from the back edge (0.1995 behind the axle);
+             beam about 0.272 above the floor = 0.226 above the board bottom (box top 0.236, cap top 0.2855) -->
+        <origin xyz="0.0455 0 0.226" rpy="0 0 0"/>
+        <!-- old robot had xyz 0.058 0 0.103 (no colons in comments - Foxy reads the model as YAML first) -->
     </joint>
 
     <link name="laser_frame">

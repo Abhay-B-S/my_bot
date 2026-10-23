@@ -17,7 +17,7 @@ import serial
 PORT = '/dev/arduino'
 BAUD = 57600
 M_PER_COUNT = 2 * math.pi * 0.034 / 1024.0
-SEPARATION = 0.225 * 1.055
+SEPARATION = 0.288 * 1.0              # wheel_separation x multiplier, config/my_controllers.yaml
 LEAD_DEG = 3.0
 
 
