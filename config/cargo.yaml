@@ -1,5 +1,5 @@
 # Cargo box servos (driven by the Arduino Nano running firmware/servo_nano, connected to the Pi by USB).
-# ALL ANGLES BELOW ARE PLACEHOLDERS: calibrate them on the finished box (docs/RUNBOOK.md, "Cargo box").
+# Lid angles calibrated on the box 2026-10-24; the lock angles are still placeholders (docs/RUNBOOK.md, "Cargo box").
 # Servo numbers are the Nano's: servo 0 = pin D9, servo 1 = pin D10, servo 2 = pin D11.
 #
 # Sequence used by scripts/cargo_controller.py:
@@ -10,12 +10,12 @@
 # PHASE 2 (later): also switch the lock servo on (enabled: true below) once its hook is built.
 
 lid:                  # servo that opens and closes the cardboard lid
-  enabled: true       # calibrate the two angles below first (servo_test.py), the numbers here are placeholders
+  enabled: true       # angles below calibrated 2026-10-24 (servo_console.py)
   servo: 0
   servo2: 1           # 2026-10-23: a second servo lifts the lid together with servo 0 (same side, same direction)
   servo2_mirror: false   # true if the second servo is mounted mirror-image (it then gets 180 - angle)
-  closed: 10          # lid shut
-  open: 90            # lid open (keep a few degrees away from where it hits something)
+  closed: 10          # lid shut (2026-10-24: calibrated on the box)
+  open: 66            # lid open (2026-10-24: calibrated on the box with both servos, v 10)
   release_when_closed: true    # let the servo go limp once the lid is shut (saves current; the lid rests by itself)
   release_when_open: false     # keep holding the lid open while a person loads or unloads the box
 
@@ -27,6 +27,7 @@ lock:                 # servo whose arm turns about 90 degrees to clamp onto the
   release_after_move: true     # let go after moving: the hook holds mechanically, and only one servo draws current at a time
 
 settle_seconds: 1.0   # pause between the lid reaching "closed" and the lock turning (lets the lid finish closing)
+speed_ms_per_degree: 10   # servo speed, sent to the Nano as 'v' on connect (smaller = faster, 3..60; firmware default 15)
 
 # Why servos are released: both servos together drew more than the Nano's USB power could supply (the Nano dropped
 # off USB on 2026-10-20). Moving ONE servo at a time and releasing it afterwards worked with no drops. A separate

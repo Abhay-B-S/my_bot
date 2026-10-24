@@ -1,0 +1,38 @@
+<?xml version="1.0" ?>
+<!-- Two-route test room (generated): a wall in the middle, ~1 m routes on both sides. Robot starts at (0, 0). -->
+<sdf version="1.5">
+  <world name="default">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+    <model name="wall_0"><static>true</static><pose>2.000 1.200 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>6.200 0.100 0.500</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>6.200 0.100 0.500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material></visual>
+      </link></model>
+    <model name="wall_1"><static>true</static><pose>2.000 -1.200 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>6.200 0.100 0.500</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>6.200 0.100 0.500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material></visual>
+      </link></model>
+    <model name="wall_2"><static>true</static><pose>-1.050 0.000 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.100 2.500 0.500</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.100 2.500 0.500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material></visual>
+      </link></model>
+    <model name="wall_3"><static>true</static><pose>5.050 0.000 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.100 2.500 0.500</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.100 2.500 0.500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material></visual>
+      </link></model>
+    <model name="wall_4"><static>true</static><pose>2.250 0.000 0.250 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.500 0.120 0.500</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.500 0.120 0.500</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material></visual>
+      </link></model>
+  </world>
+</sdf>

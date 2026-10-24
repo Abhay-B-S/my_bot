@@ -163,13 +163,16 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
   wait_shipped: ["Robot is at the sender", "warn"],
   going_to_destination: ["Robot is carrying the parcel to the receiver", ""],
   wait_received: ["Robot has arrived at the receiver", "warn"],
+  returning: ["Could not deliver: bringing the parcel back to the sender", "bad"],
+  wait_returned: ["Robot is back at the sender with the parcel", "warn"],
   delivered: ["Delivered", "ok"],
+  returned: ["Returned to the sender", "bad"],
   failed: ["Delivery failed", "bad"],
   rejected: ["Request rejected", "bad"],
 };
 
 const $ = id => document.getElementById(id);
-let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, unsub = [];
+let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, lastDetail = {}, unsub = [];
 let mapInfo = null, mapImg = null, pose = null;
 
 function cabinLabel(c) { return c.replace("_", " "); }
@@ -320,7 +323,8 @@ function needsMe(r) {
   const mine = current && current.cabin;
   // stops once the person has reacted (pressed Open lid, or the final button)
   return r && ((r.status === "wait_shipped" && r.sender === mine && !r.shipped && !r.lidSender) ||
-               (r.status === "wait_received" && r.destination === mine && !r.received && !r.lidReceiver));
+               (r.status === "wait_received" && r.destination === mine && !r.received && !r.lidReceiver) ||
+               (r.status === "wait_returned" && r.sender === mine && !r.returned && !r.lidReturn));
 }
 setInterval(() => { if (current && Object.values(requests).some(needsMe)) beep("arrive"); }, 15000);
 
@@ -460,19 +464,29 @@ function render() {
       card.appendChild(el("div", "alert", "The robot has arrived at your cabin. Take the parcel, then press Received."));
       const b = el("button", "big", "Received"); b.onclick = () => { b.disabled = true; press(id, "received"); };
       card.appendChild(b);
-    } else if (r.status === "failed" || r.status === "rejected") {
-      card.appendChild(el("div", "muted", r.detail || ""));
+    } else if (r.status === "wait_returned" && r.sender === mine && !r.returned && lidMode()) {
+      lidSteps(card, id, r.lidReturn, "lidReturn", "returned", "take your parcel back out", "Close lid & done");
+    } else if (r.status === "wait_returned" && r.sender === mine && !r.returned) {
+      card.appendChild(el("div", "alert", "The robot could not deliver your parcel and brought it back. Take it out, then press Parcel taken back."));
+      const b = el("button", "big", "Parcel taken back"); b.onclick = () => { b.disabled = true; press(id, "returned"); };
+      card.appendChild(b);
     } else if (r.status === "delivered") {
       card.appendChild(el("div", "muted", "Parcel delivered."));
+    } else if (r.detail && r.status !== "pending" && r.status !== "queued") {
+      card.appendChild(el("div", "muted", r.detail));   // why it failed, or e.g. "the route is blocked ..."
     }
     list.appendChild(card);
     // Beep when it is this person's turn (also the first time they see it), and when their parcel is
     // delivered or a delivery fails.
     const key = mine + ":" + id, seen = key in lastStatus;
-    const act = (r.status === "wait_shipped" && r.sender === mine) || (r.status === "wait_received" && r.destination === mine);
-    const done = (r.status === "delivered" && r.sender === mine) || r.status === "failed";
-    if (lastStatus[key] !== r.status && (act || (done && seen))) beep(act ? "arrive" : "done");
+    const act = (r.status === "wait_shipped" && r.sender === mine) || (r.status === "wait_received" && r.destination === mine) ||
+                (r.status === "wait_returned" && r.sender === mine);
+    const done = (r.status === "delivered" && r.sender === mine) || ["failed", "returning", "returned"].includes(r.status);
+    // a blocked route is news for both people (also while the status itself stays the same)
+    const blocked = seen && r.detail !== lastDetail[key] && /blocked/i.test(r.detail || "");
+    if ((lastStatus[key] !== r.status && (act || (done && seen))) || blocked) beep(act ? "arrive" : "done");
     lastStatus[key] = r.status;
+    lastDetail[key] = r.detail;
   });
 }
 

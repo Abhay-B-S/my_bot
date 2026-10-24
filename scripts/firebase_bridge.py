@@ -6,7 +6,7 @@ so no Firebase package has to be installed and no key file is needed.
 
 Database layout (see web/index.html for the writer side):
   /requests/<id>  {sender, destination, senderName, receiverName, status, detail, shipped, received, created,
-                   lidSender, lidReceiver}
+                   lidSender, lidReceiver, returned, lidReturn}
   /robot          {state, detail, queue, ref, lid, lidButtons, heartbeat}      written by this bridge
   /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
   /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
@@ -18,6 +18,9 @@ Flow:
   website sets shipped/received = true             -> bridge publishes /delivery_shipped, /delivery_received
                                                       (only while the manager is waiting for that very request)
   website sets lidSender/lidReceiver = true        -> bridge publishes /delivery_open_lid (same check)
+  undeliverable parcel back at the sender: website sets lidReturn / returned = true
+                                                   -> /delivery_open_lid, /delivery_returned (same check)
+  the request's detail follows the manager's detail while the job runs (e.g. "the route is blocked ...")
 
 Login: the bridge signs in as robot@example.com; its password is read from ~/.delivery_robot_password
 (a private file outside the repo). Fallback to the old open database: --ros-args -p use_auth:=false
@@ -56,9 +59,11 @@ NAME_RE = re.compile(r'^[A-Za-z0-9_]+$')          # location names we accept fro
 
 # manager state -> status text stored on the request
 STATE_TO_STATUS = {'TO_PICKUP': 'going_to_sender', 'WAIT_SHIPPED': 'wait_shipped',
-                   'TO_DROPOFF': 'going_to_destination', 'WAIT_RECEIVED': 'wait_received'}
-UNFINISHED = ('queued', 'going_to_sender', 'wait_shipped', 'going_to_destination', 'wait_received')
-FINAL = ('delivered', 'failed', 'rejected')
+                   'TO_DROPOFF': 'going_to_destination', 'WAIT_RECEIVED': 'wait_received',
+                   'RETURN_TO_SENDER': 'returning', 'WAIT_RETURNED': 'wait_returned'}
+UNFINISHED = ('queued', 'going_to_sender', 'wait_shipped', 'going_to_destination', 'wait_received',
+              'returning', 'wait_returned')
+FINAL = ('delivered', 'returned', 'failed', 'rejected')
 
 
 class FirebaseBridge(Node):
@@ -88,6 +93,7 @@ class FirebaseBridge(Node):
         self.request_pub = self.create_publisher(String, '/delivery_request', 10)
         self.shipped_pub = self.create_publisher(Empty, '/delivery_shipped', 10)
         self.received_pub = self.create_publisher(Empty, '/delivery_received', 10)
+        self.returned_pub = self.create_publisher(Empty, '/delivery_returned', 10)
         self.open_lid_pub = self.create_publisher(Empty, '/delivery_open_lid', 10)
         self.create_subscription(String, '/delivery_status', self._on_status, 10)
 
@@ -98,7 +104,10 @@ class FirebaseBridge(Node):
         self.sent_received = set()
         self.sent_lid_sender = set()
         self.sent_lid_receiver = set()
+        self.sent_returned = set()
+        self.sent_lid_return = set()
         self.written = {}                # request id -> last status we wrote
+        self.written_detail = {}         # request id -> last detail we wrote
         self.out = queue.Queue()         # pending writes to Firebase
         self.net_ok = None
         self.first_poll = True
@@ -197,7 +206,10 @@ class FirebaseBridge(Node):
     def _queue_patch(self, rid, status, detail):
         """Write a request's status; remember it only after the write succeeded."""
         body = {'status': status, 'detail': detail}
-        self.out.put(('PATCH', 'requests/%s' % rid, body, lambda: self.written.__setitem__(rid, status)))
+
+        def done():
+            self.written[rid], self.written_detail[rid] = status, detail
+        self.out.put(('PATCH', 'requests/%s' % rid, body, done))
 
     # ---------- incoming from the website ----------
     def _poll_loop(self):
@@ -236,6 +248,10 @@ class FirebaseBridge(Node):
                 self._press('WAIT_SHIPPED', rid, self.shipped_pub, self.sent_shipped)
             if r.get('received') is True and rid not in self.sent_received:
                 self._press('WAIT_RECEIVED', rid, self.received_pub, self.sent_received)
+            if r.get('lidReturn') is True and rid not in self.sent_lid_return:
+                self._press('WAIT_RETURNED', rid, self.open_lid_pub, self.sent_lid_return)
+            if r.get('returned') is True and rid not in self.sent_returned:
+                self._press('WAIT_RETURNED', rid, self.returned_pub, self.sent_returned)
 
     def _forward(self, rid, r):
         sender, dest = str(r.get('sender', '')), str(r.get('destination', ''))
@@ -270,11 +286,13 @@ class FirebaseBridge(Node):
         ref, result = st.get('ref'), st.get('result')
         if ref:
             if result:
-                status = 'delivered' if result == 'delivered' else 'failed'
+                status = result if result in ('delivered', 'returned') else 'failed'
             else:
                 status = STATE_TO_STATUS.get(st.get('state'))
-            if status and self.written.get(ref) != status and self.written.get(ref) not in FINAL:
-                self._queue_patch(ref, status, st.get('detail', ''))
+            detail = st.get('detail', '')
+            if status and self.written.get(ref) not in FINAL and \
+                    (self.written.get(ref) != status or self.written_detail.get(ref) != detail):
+                self._queue_patch(ref, status, detail)
         self.out.put(('PUT', 'robot', self._robot_body(), None))
 
     # ---------- live map ----------

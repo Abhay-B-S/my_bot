@@ -27,7 +27,7 @@
     "requests": {
       ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
       "$id": {
-        ".write": "auth != null && (root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot' || (!data.exists() && newData.exists() && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == newData.child('sender').val() && newData.child('sender').val() != newData.child('destination').val() && newData.child('status').val() == 'pending' && !newData.child('shipped').exists() && !newData.child('received').exists() && !newData.child('lidSender').exists() && !newData.child('lidReceiver').exists()))",
+        ".write": "auth != null && (root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot' || (!data.exists() && newData.exists() && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == newData.child('sender').val() && newData.child('sender').val() != newData.child('destination').val() && newData.child('status').val() == 'pending' && !newData.child('shipped').exists() && !newData.child('received').exists() && !newData.child('lidSender').exists() && !newData.child('lidReceiver').exists() && !newData.child('returned').exists() && !newData.child('lidReturn').exists()))",
 
         "sender": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
         "destination": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
@@ -51,6 +51,14 @@
         },
         "lidReceiver": {
           ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('destination').val() && data.parent().child('status').val() == 'wait_received' && newData.val() == true",
+          ".validate": "newData.val() == true"
+        },
+        "returned": {
+          ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('sender').val() && data.parent().child('status').val() == 'wait_returned' && newData.val() == true",
+          ".validate": "newData.val() == true"
+        },
+        "lidReturn": {
+          ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('sender').val() && data.parent().child('status').val() == 'wait_returned' && newData.val() == true",
           ".validate": "newData.val() == true"
         },
 

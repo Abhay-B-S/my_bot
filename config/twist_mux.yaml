@@ -3,6 +3,7 @@
 # Output topic is remapped on the command line to /diff_cont/cmd_vel_unstamped (Foxy: unstamped Twist).
 #   navigation: Nav2 publishes /cmd_vel
 #   keyboard:   teleop_twist_keyboard remapped to /cmd_vel_key (replaces the joystick of the reference repo)
+#   guard:      scripts/path_guard.py holds the robot (zero speed) while its route is blocked
 #   recovery:   scripts/self_recovery.py turns the robot slowly while it searches for its position
 twist_mux:
   ros__parameters:
@@ -11,6 +12,10 @@ twist_mux:
         topic   : cmd_vel
         timeout : 0.5
         priority: 10
+      guard:
+        topic   : cmd_vel_guard
+        timeout : 0.3
+        priority: 40
       recovery:
         topic   : cmd_vel_recovery
         timeout : 0.5

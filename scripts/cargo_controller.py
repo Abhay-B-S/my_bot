@@ -46,6 +46,9 @@ class SimLink:
     def release(self, servo):
         return True, 'OK'
 
+    def set_speed(self, ms):
+        return True, 'OK %d' % ms
+
     def close(self):
         pass
 
@@ -86,6 +89,17 @@ class NanoLink:
         """Tell the servo to stop holding (it goes limp and draws no current)."""
         self.ser.reset_input_buffer()
         self.ser.write(('d %d\n' % servo).encode())
+        end = time.time() + 2.0
+        while time.time() < end:
+            line = self.ser.readline().decode(errors='ignore').strip()
+            if line.startswith('OK'):
+                return True, line
+        return False, 'no answer from the Nano'
+
+    def set_speed(self, ms):
+        """Milliseconds per degree (firmware 'v' command); the Nano forgets it on every reset."""
+        self.ser.reset_input_buffer()
+        self.ser.write(('v %d\n' % ms).encode())
         end = time.time() + 2.0
         while time.time() < end:
             line = self.ser.readline().decode(errors='ignore').strip()
@@ -219,6 +233,10 @@ class CargoController(Node):
                     time.sleep(3.0)
                     continue
                 self.get_logger().info('Servo Nano found on %s' % self.link.port)
+                ms = int(self.cfg.get('speed_ms_per_degree', 15))
+                ok, reply = self.link.set_speed(ms)
+                if not ok:
+                    self.get_logger().warn('Could not set the servo speed: %s' % reply)
             if not self.started_lock and self.get_parameter('lock_on_start').value:
                 self.started_lock = True
                 self._do('lock')

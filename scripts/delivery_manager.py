@@ -12,6 +12,7 @@ Topics (all plain ROS 2, so a website bridge can use them later):
   in : /delivery_shipped   std_msgs/Empty   sender has loaded the parcel
   in : /delivery_received  std_msgs/Empty   receiver has taken the parcel
   in : /delivery_open_lid  std_msgs/Empty   the person at the robot wants the lid open (lid_buttons mode)
+  in : /delivery_returned  std_msgs/Empty   the sender has taken an undeliverable parcel back out
   out: /delivery_status    std_msgs/String  JSON: state, job, sender, destination, detail, queue, cargo, lid_buttons
 
 Parcel box (needs cargo_controller.py running):
@@ -23,6 +24,18 @@ Parcel box (needs cargo_controller.py running):
 Self-recovery (needs scripts/self_recovery.py running):  -p self_recovery:=true
   on /localization_status "lost" the job is paused (Nav2 goal cancelled); on "recovered" the robot continues to the
   same spot (or drives back to the cabin it was waiting at, if someone moved it); "help: ..." is shown on the website
+
+Blocked routes (needs scripts/path_guard.py running):  -p path_guard:=true
+  /path_status "waiting"/"rerouting"/"detour" are shown on the website. "blocked" (no way at all), or `max_detours`
+  route switches on one leg (the other way was blocked too), ends the leg at once:
+    on the way to the sender                 -> job failed, the robot goes home
+    on the way to the receiver (parcel)      -> it brings the parcel back to the sender (RETURN_TO_SENDER), waits
+                                                there for "returned" (WAIT_RETURNED; website: "Parcel taken back")
+    on the way back to the sender (parcel)   -> job failed, it goes home with the parcel
+    on the way home                          -> it stops and asks for the path to be cleared; continues once clear
+  (Optional: -p blocked_rechecks:=N waits `recheck_wait` s and looks at every route again N times before giving up;
+  0 by default, the user found re-checking too slow on 2026-10-24.)
+  The same giving-up rules apply when Nav2 fails a leg `max_nav_retries` times for any other reason.
 
 Run (sim, Nav2 already running):
   python3 src/my_bot/scripts/delivery_manager.py --ros-args -p use_sim_time:=true
@@ -40,6 +53,7 @@ import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
@@ -54,6 +68,8 @@ WAIT_SHIPPED = 'WAIT_SHIPPED'
 TO_DROPOFF = 'TO_DROPOFF'
 WAIT_RECEIVED = 'WAIT_RECEIVED'
 RETURNING = 'RETURNING'
+RETURN_TO_SENDER = 'RETURN_TO_SENDER'    # could not deliver: bringing the parcel back
+WAIT_RETURNED = 'WAIT_RETURNED'          # back at the sender, waiting for "returned"
 
 
 class DeliveryManager(Node):
@@ -72,6 +88,11 @@ class DeliveryManager(Node):
         self.declare_parameter('go_home_between_jobs', False)  # True = old behaviour: always return home first
         self.declare_parameter('lid_buttons', False)          # True = the person opens the lid from the website
         self.declare_parameter('self_recovery', False)        # True = pause/resume on /localization_status
+        self.declare_parameter('path_guard', False)           # True = report/pause on /path_status (blocked routes)
+        self.declare_parameter('blocked_rechecks', 0)         # times all routes are checked again before giving up
+        self.declare_parameter('recheck_wait', 15.0)          # s to wait (blocked) before checking the routes again
+        self.declare_parameter('return_to_sender', True)      # undeliverable parcel goes back to the sender
+        self.declare_parameter('max_detours', 2)              # route switches on one leg before "every route blocked"
         self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
                                                               # is really this close to the spot (0 = do not check)
 
@@ -93,6 +114,7 @@ class DeliveryManager(Node):
         self.create_subscription(String, '/delivery_request', self._on_request, 10)
         self.create_subscription(Empty, '/delivery_shipped', self._on_shipped, 10)
         self.create_subscription(Empty, '/delivery_received', self._on_received, 10)
+        self.create_subscription(Empty, '/delivery_returned', self._on_returned, 10)
         # transient local: a late subscriber (e.g. the website bridge) still gets the last status
         status_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                 reliability=ReliabilityPolicy.RELIABLE)
@@ -117,6 +139,17 @@ class DeliveryManager(Node):
         if self.recovery_enabled:
             self.create_subscription(String, '/localization_status', self._on_localization, status_qos)
             self.get_logger().info('Self-recovery ENABLED (needs self_recovery.py running)')
+        self.path_blocked = False        # path_guard says the route is blocked with no other way: wait
+        self.path_state = 'clear'
+        self.blocked_since = 0.0
+        self.rechecks = 0                # route checks already done on this leg
+        self.detours = 0                 # route switches since the leg (or the last check) started
+        self.hold_until = 0.0            # no new goal before this time
+        if self.get_parameter('path_guard').value:
+            self.create_subscription(String, '/path_status', self._on_path_status, status_qos)
+            self.forget_pub = self.create_publisher(Empty, '/path_guard/forget', 10)
+            self.clear_costmap = self.create_client(ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
+            self.get_logger().info('Path guard ENABLED (needs path_guard.py running)')
 
         self.state = IDLE
         self.queue = deque()
@@ -201,12 +234,26 @@ class DeliveryManager(Node):
                           result='delivered')
             self._go(self.home)      # the main loop cancels this if a job arrives on the way
 
+    def _on_returned(self, _msg):
+        if self.state != WAIT_RETURNED:
+            self.get_logger().warn('Ignoring "returned": state is %s' % self.state)
+            return
+        self.state = RETURNING
+        if self.queue and not self.get_parameter('go_home_between_jobs').value:
+            self._publish('Parcel of job %d returned to %s. Going straight to the next job (%d waiting)'
+                          % (self.job['id'], self.job['sender'], len(self.queue)), result='returned')
+        else:
+            self._publish('Parcel of job %d returned to %s. Returning to %s'
+                          % (self.job['id'], self.job['sender'], self.home), result='returned')
+            self._go(self.home)
+
     # ---------- parcel-box lock ----------
     def _on_localization(self, msg):
         text = msg.data
         if text == 'lost' and not self.lost:
             self.lost = True
-            if self.state in (TO_PICKUP, TO_DROPOFF, RETURNING, WAIT_SHIPPED, WAIT_RECEIVED):
+            if self.state in (TO_PICKUP, TO_DROPOFF, RETURNING, WAIT_SHIPPED, WAIT_RECEIVED, RETURN_TO_SENDER,
+                              WAIT_RETURNED):
                 self.resume_target = self._current_target()
             self._abandon_goal()
             self._publish('Robot lost its position (moved or bumped?). Finding it again...')
@@ -221,11 +268,92 @@ class DeliveryManager(Node):
         elif text.startswith('help') and self.lost:
             self._publish('Robot needs help: %s' % text.split(':', 1)[-1].strip())
 
+    def _on_path_status(self, msg):
+        kind = msg.data.split(':', 1)[0]
+        previous, self.path_state = self.path_state, kind
+        if (kind == previous and kind != 'detour') or self.state in (IDLE, WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED):
+            return
+        target = self._current_target()
+        if kind == 'around':
+            self.get_logger().info('Going round something on the same route')
+        elif kind == 'waiting':
+            self._publish('Something is in the way. Waiting for it to move...')
+        elif kind == 'rerouting':
+            self._publish('The route is blocked. Looking for another way to %s...' % target)
+        elif kind == 'detour':
+            self.detours += 1
+            if self.detours < self.get_parameter('max_detours').value:
+                self._publish('The route is blocked. Taking another way to %s.' % target)
+            else:                                # switched back and forth: every way must be blocked
+                self.get_logger().warn('%d route switches on this leg: treating every route as blocked' % self.detours)
+                kind = 'blocked'
+        if kind == 'blocked' and not self.path_blocked:
+            self._abandon_goal()
+            if self.state != RETURNING and self.rechecks >= self.get_parameter('blocked_rechecks').value:
+                self._give_up(target, 'every route is blocked')     # no more checking: act now
+                return
+            self.path_blocked = True
+            self.blocked_since = time.monotonic()
+            self.want_goal = target              # continue to the same spot once the way is clear
+            if self.state == RETURNING:
+                self._publish('Every route to %s is blocked. Please clear the path; the robot continues as soon '
+                              'as it is clear.' % target)
+            else:
+                self._publish('Every route to %s is blocked. Please clear the path. Checking again in %.0f s.'
+                              % (target, self.get_parameter('recheck_wait').value))
+        elif kind == 'clear' and self.path_blocked:
+            self.path_blocked = False
+            self.retries = 0
+            self._publish('The way is clear again. Continuing to %s.' % target)
+        elif kind == 'clear' and previous in ('waiting', 'rerouting'):
+            self._publish('The way is free again. Continuing to %s.' % target)
+
+    def _recheck_or_give_up(self):
+        """Blocked for recheck_wait s: look at every route again, or give the leg up after blocked_rechecks checks."""
+        target = self._current_target()
+        self.path_blocked = False
+        if self.rechecks < self.get_parameter('blocked_rechecks').value:
+            self.rechecks += 1
+            self.detours = 0
+            self.forget_pub.publish(Empty())         # the guard forgets what it saw, so Nav2 tries every way again
+            if self.clear_costmap.service_is_ready():
+                self.clear_costmap.call_async(ClearEntireCostmap.Request())
+            self.want_goal, self.retries = target, 0
+            self.hold_until = time.monotonic() + 1.5     # let the costmap take the forgotten blocks first
+            self._publish('Checking the routes to %s again (check %d)...' % (target, self.rechecks))
+        else:
+            self._give_up(target, 'every route is blocked')
+
+    def _give_up(self, target, why):
+        """A leg cannot be done: decide what happens to the job (see the module description)."""
+        home = self.home
+        if self.state == TO_PICKUP:
+            failed = self.job['id']
+            self.state = RETURNING
+            self._publish('FAILED job %d: could not reach %s (%s). Returning to %s'
+                          % (failed, target, why, home), result='failed')
+            self._go(home)
+        elif self.state == TO_DROPOFF and self.get_parameter('return_to_sender').value:
+            self.state = RETURN_TO_SENDER
+            self._publish('Could not reach %s (%s). Bringing the parcel back to %s.'
+                          % (target, why, self.job['sender']))
+            self._go(self.job['sender'])
+        elif self.state in (TO_DROPOFF, RETURN_TO_SENDER):
+            failed = self.job['id']
+            self.state = RETURNING
+            self._publish('FAILED job %d: could not reach %s (%s). Returning to %s with the parcel'
+                          % (failed, target, why, home), result='failed')
+            self._go(home)
+        else:                                    # on the way home
+            self.state = IDLE
+            self.job = None
+            self._publish('FAILED to reach %s (%s). Staying here.' % (target, why))
+
     def _on_open_lid(self, _msg):
         if not self.lid_buttons:
             self.get_logger().warn('Ignoring "open lid": lid_buttons is off')
             return
-        if self.state not in (WAIT_SHIPPED, WAIT_RECEIVED):
+        if self.state not in (WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED):
             self.get_logger().warn('Ignoring "open lid": state is %s' % self.state)
             return
         self._cargo('unlock')
@@ -234,7 +362,7 @@ class DeliveryManager(Node):
         changed = msg.data != self.cargo_state
         self.cargo_state = msg.data
         # tell the website what the lid is doing while a person stands at the robot
-        if changed and self.lid_buttons and self.state in (WAIT_SHIPPED, WAIT_RECEIVED):
+        if changed and self.lid_buttons and self.state in (WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED):
             self._publish(self.last_detail)
 
     def _cargo(self, cmd):
@@ -266,6 +394,8 @@ class DeliveryManager(Node):
     def _go(self, name):
         self.want_goal = name
         self.retries = 0
+        self.rechecks = 0
+        self.detours = 0
         if self.cargo_enabled and self.cargo_state != 'locked':
             self._cargo('lock')               # always lock before leaving a person (and at the start of a job)
 
@@ -365,24 +495,18 @@ class DeliveryManager(Node):
 
     def _nav_failed(self, reason):
         name = self._current_target()
+        if self.path_blocked:                # the guard said so: wait for the way to clear, keep the retries
+            self.want_goal = name
+            return
         self.retries += 1
         if self.retries <= self.get_parameter('max_nav_retries').value:
             self.get_logger().warn('%s while going to %s: retry %d' % (reason, name, self.retries))
             self.want_goal = name
             return
-        if self.state == RETURNING:
-            self.state = IDLE
-            self.job = None
-            self._publish('FAILED to reach %s (%s). Staying here.' % (name, reason))
-            return
-        failed = self.job['id']
-        self.state = RETURNING
-        self._publish('FAILED job %d: could not reach %s (%s). Returning to %s'
-                      % (failed, name, reason, self.home), result='failed')
-        self._go(self.home)
+        self._give_up(name, reason)
 
     def _current_target(self):
-        if self.state in (TO_PICKUP, WAIT_SHIPPED):
+        if self.state in (TO_PICKUP, WAIT_SHIPPED, RETURN_TO_SENDER, WAIT_RETURNED):
             return self.job['sender']
         if self.state in (TO_DROPOFF, WAIT_RECEIVED):
             return self.job['destination']
@@ -401,6 +525,13 @@ class DeliveryManager(Node):
             self._publish('At %s. Waiting for "received".' % self.job['destination'])
             if not self.lid_buttons:
                 self._cargo('unlock')         # the receiver can now take it out
+        elif self.state == RETURN_TO_SENDER:
+            self.state = WAIT_RETURNED
+            self.deadline = time.monotonic() + self.get_parameter('wait_received_timeout').value
+            self._publish('Back at %s with the parcel (could not deliver it to %s). Please take it out.'
+                          % (self.job['sender'], self.job['destination']))
+            if not self.lid_buttons:
+                self._cargo('unlock')
         elif self.state == RETURNING:
             self.state = IDLE
             self.job = None
@@ -428,7 +559,8 @@ class DeliveryManager(Node):
             self._watch_goal(now)
 
         # send a wanted goal as soon as Nav2 is ready
-        if self.want_goal and not self.navigating and not self.lost and self._cargo_ready(now):
+        if self.want_goal and not self.navigating and not self.lost and not self.path_blocked and now >= self.hold_until \
+                and self._cargo_ready(now):
             if self.dry_run or self.client.server_is_ready():
                 name, self.want_goal = self.want_goal, None
                 self._send_goal(name)
@@ -436,9 +568,14 @@ class DeliveryManager(Node):
                 self.last_wait_log = now
                 self.get_logger().warn('Waiting for the Nav2 navigate_to_pose action server...')
 
+        # blocked with no way at all for a while: check the routes again, or give the leg up
+        if self.path_blocked and self.state != RETURNING and \
+                now - self.blocked_since >= self.get_parameter('recheck_wait').value:
+            self._recheck_or_give_up()
+
         # timeouts while waiting for people
-        if self.state in (WAIT_SHIPPED, WAIT_RECEIVED) and now > self.deadline:
-            what = '"shipped"' if self.state == WAIT_SHIPPED else '"received"'
+        if self.state in (WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED) and now > self.deadline:
+            what = {WAIT_SHIPPED: '"shipped"', WAIT_RECEIVED: '"received"'}.get(self.state, '"parcel taken back"')
             self.state = RETURNING
             self._publish('Timed out waiting for %s (job %d). Returning to %s'
                           % (what, self.job['id'], self.home), result='failed')
