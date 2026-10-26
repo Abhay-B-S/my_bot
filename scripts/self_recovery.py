@@ -48,8 +48,10 @@ class SelfRecovery(Node):
     def __init__(self):
         super().__init__('self_recovery')
         defaults = {
-            'lost_threshold': 0.40,   # share of scan points on walls below which we may be lost
-            'lost_seconds': 3.0,      # ... for this long
+            'lost_threshold': 0.50,   # share of scan points on walls below which we may be lost (2026-10-26: was 0.40;
+                                      # a 53-80 % match for 40 s while turning on marble drove the robot into the sofa;
+                                      # 0.60 stopped it needlessly beside railings, which always match ~55 %)
+            'lost_seconds': 2.0,      # ... for this long (was 3.0)
             'good_threshold': 0.75,   # share that counts as "found"
             'good_checks': 3,         # ... this many checks in a row (0.5 s apart)
             'unique_margin': 0.05,    # the best pose must beat the best DIFFERENT place by this much

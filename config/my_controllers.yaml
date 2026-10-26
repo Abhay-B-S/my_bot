@@ -27,7 +27,11 @@ diff_cont:
 
     # wheels_per_side: x
     # wheel_separation_multiplier: x
-    wheel_separation_multiplier: 0.9   # 360 degree turn tests 2026-10-23 - real turns ~10% more than 0.288 predicts (ratios 0.88, 0.905)
+    # FLOOR-DEPENDENT: re-measure on every new floor (turn on the spot, lidar measures the real turn).
+    # 2026-10-23 friend's room: 0.9 (ratios 0.88, 0.905). 2026-10-26 granny's marble with a FLAT battery (2.7 V
+    # cells): ~1.47. Same marble with fresh cells, measured by scripts/calibrate_turn.py: 1.20 and 1.34 (the slip
+    # varies from turn to turn, 70-110 % per step) -> middle value 1.27; AMCL (lidar) corrects the rest.
+    wheel_separation_multiplier: 1.27
     left_wheel_radius_multiplier: 1.0
     right_wheel_radius_multiplier: 1.0
     # i have uncommented above two lines
@@ -45,13 +49,15 @@ diff_cont:
     # Gradual starts and stops (2026-10-23): an instant stop of the heavy robot made a current spike that
     # restarted the motor Arduino, after which the motors ran uncontrolled. Every command (keyboard, Nav2)
     # now ramps at most 0.8 m/s per second and 1.2 rad/s per second; speeds are also capped as a safety net.
+    # 2026-10-26: halved to 0.4 m/s per second and 0.6 rad/s per second (the Arduino still restarted twice
+    # while mapping on a marble floor; gentler current changes = smaller spikes).
     linear.x.has_velocity_limits: true
     linear.x.has_acceleration_limits: true
     # linear.x.has_jerk_limits: false
     linear.x.max_velocity: 0.25
     linear.x.min_velocity: -0.25
-    linear.x.max_acceleration: 0.8
-    linear.x.min_acceleration: -0.8
+    linear.x.max_acceleration: 0.4
+    linear.x.min_acceleration: -0.4
     # linear.x.max_jerk: NAN
     # linear.x.min_jerk: NAN
 
@@ -60,8 +66,8 @@ diff_cont:
     # angular.z.has_jerk_limits: false
     angular.z.max_velocity: 1.0
     angular.z.min_velocity: -1.0
-    angular.z.max_acceleration: 1.2
-    angular.z.min_acceleration: -1.2
+    angular.z.max_acceleration: 0.6
+    angular.z.min_acceleration: -0.6
     # angular.z.max_jerk: NAN
     # angular.z.min_jerk: NAN
 

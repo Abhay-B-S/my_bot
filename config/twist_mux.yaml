@@ -4,6 +4,8 @@
 #   navigation: Nav2 publishes /cmd_vel
 #   keyboard:   teleop_twist_keyboard remapped to /cmd_vel_key (replaces the joystick of the reference repo)
 #   guard:      scripts/path_guard.py holds the robot (zero speed) while its route is blocked
+#   assist:     scripts/gap_assist.py lines the robot up with a narrow gap when Nav2 is stuck (above the guard,
+#               which it never overrides: it does not start while the guard holds the robot)
 #   recovery:   scripts/self_recovery.py turns the robot slowly while it searches for its position
 twist_mux:
   ros__parameters:
@@ -16,6 +18,10 @@ twist_mux:
         topic   : cmd_vel_guard
         timeout : 0.3
         priority: 40
+      assist:                       # scripts/gap_assist.py lines the robot up with a narrow gap and drives through
+        topic   : cmd_vel_assist
+        timeout : 0.5
+        priority: 45
       recovery:
         topic   : cmd_vel_recovery
         timeout : 0.5

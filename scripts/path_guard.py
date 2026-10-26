@@ -48,7 +48,7 @@ def yaw_of(q):
 
 
 def length(route):
-    return float(np.hypot(np.diff(route[:, 0]), np.diff(route[:, 1])).sum()) if len(route) > 1 else 0.0
+    return float(np.hypot(np.diff(route[:, 0]), np.diff(route[:, 1])).sum()) if route is not None and len(route) > 1 else 0.0
 
 
 class PathGuard(Node):
@@ -72,6 +72,9 @@ class PathGuard(Node):
                                          # real test 2026-10-24)
             'plan_fresh': 2.5,         # s: an older plan is not used to start a stop
             'max_range': 4.0,          # m: ignore farther lidar points
+            'wall_margin': 0.20,       # m: lidar points this close to anything in the map are the map, not new
+                                       # obstacles (10 cm was too little: a sofa edge seen 15-20 cm off while the
+                                       # position was slightly wrong became a "block", 2026-10-26)
         }
         for k, v in defaults.items():
             self.declare_parameter(k, v)
@@ -89,7 +92,7 @@ class PathGuard(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.near_wall = None       # map mask: map walls grown by 2 cells (lidar points there are walls, not obstacles)
+        self.near_wall = None       # map mask: map walls grown by wall_margin (lidar points there are walls, not obstacles)
         self.info = None
         self.scan = None
         self.plan = None            # Nx2 array of the latest plan
@@ -124,8 +127,9 @@ class PathGuard(Node):
         grid = np.array(m.data, dtype=np.int16).reshape(info.height, info.width)
         occ = grid >= 65
         grown = occ.copy()
-        for dx in range(-2, 3):
-            for dy in range(-2, 3):
+        k = int(round(self.p['wall_margin'] / info.resolution))
+        for dx in range(-k, k + 1):
+            for dy in range(-k, k + 1):
                 grown |= np.roll(np.roll(occ, dx, axis=1), dy, axis=0)
         self.near_wall, self.info = grown, info
 
@@ -231,6 +235,8 @@ class PathGuard(Node):
         if not keep.all():
             self.get_logger().info('Forgot %d blocked points (%d left)' % (int((~keep).sum()), int(keep.sum())))
         self.blocked = self.blocked[keep]
+        if len(keep) and not keep.any():             # every remembered block is gone: always say so (the manager
+            self._status(CLEAR, 'every remembered block is gone')   # may be waiting for it)
 
     def _still_there(self, laser):
         """True when the obstacle seen at the stop (snapshot) is still visible."""
@@ -319,7 +325,10 @@ class PathGuard(Node):
             return
 
         if not self.goal_active:
-            self.last_plan, self.noticed_plan = None, None
+            # also drop the last received plan: the first plan seen after a NEW goal starts was otherwise the old
+            # goal's finished, ~0 m plan, and the new goal's full route looked like a detour (false "every route
+            # blocked" on the way home from cabin D, real test 2026-10-26)
+            self.last_plan, self.noticed_plan, self.plan = None, None, None
             if self.state == WAITING and now - self.since > 1.0:
                 self._status(CLEAR, 'Nav2 is no longer driving')
             elif self.state == REROUTING or (self.state == CLEAR and now - self.aborted_at < 3.0 and len(self.blocked)):

@@ -85,9 +85,11 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'default_bt_xml_filename',
+            # Foxy's default tree minus the Spin recovery (spins were refused or made things worse in doorways,
+            # 2026-10-26). config/nav2_bt_backup.xml adds a short, slow back-up, but reversing still froze the motor
+            # Arduino (2026-10-26, lifted and on the floor): use it only after the motor wiring fix
             default_value=os.path.join(
-                get_package_share_directory('nav2_bt_navigator'),
-                'behavior_trees', 'navigate_w_replanning_and_recovery.xml'),
+                get_package_share_directory('my_bot'), 'config', 'nav2_bt_doorway.xml'),
             description='Full path to the behavior tree xml file to use'),
 
         DeclareLaunchArgument(

@@ -1,0 +1,36 @@
+<!--
+  Foxy's navigate_w_replanning_and_recovery.xml plus a short, slow BACK-UP as the first recovery step (2026-10-26):
+  the robot got wedged nose-first against a wall and could not turn (its back swings 0.33 m) or drive on.
+  BackUp checks the costmap behind it first. Reversing could upset the motor Arduino (lifted test 2026-10-26:
+  1 burst + 1 freeze in 8 tries), so it is only 10 cm at 0.05 m/s and the safety watchdog stops a backward burst.
+  To go back to the original tree: navigation_launch.py default_bt_xml_filename:=<nav2_bt_navigator>/.../
+  navigate_w_replanning_and_recovery.xml
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <SequenceStar name="RecoveryActions">
+          <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <BackUp backup_dist="0.10" backup_speed="0.05"/>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+        </SequenceStar>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

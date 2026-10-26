@@ -1,7 +1,7 @@
 amcl:
   ros__parameters:
     use_sim_time: True
-    alpha1: 0.2
+    alpha1: 0.8   # 2026-10-26: turning on the spot slips a lot on smooth floors (marble: 360 deg odometry = 220-270 real); trust the lidar more for heading (was 0.2)
     alpha2: 0.2
     alpha3: 0.2
     alpha4: 0.2
@@ -31,8 +31,8 @@ amcl:
     sigma_hit: 0.2
     tf_broadcast: true
     transform_tolerance: 1.0
-    update_min_a: 0.2
-    update_min_d: 0.25
+    update_min_a: 0.1   # 2026-10-26: correct the heading during turns (was 0.2)
+    update_min_d: 0.1   # 2026-10-26 (was 0.25)
     z_hit: 0.5
     z_max: 0.05
     z_rand: 0.5
@@ -115,22 +115,23 @@ controller_server:
       min_vel_y: 0.0
       max_vel_x: 0.24   # 2026-10-24 faster (user found 0.24 smooth in teleop; diff_cont caps 0.25); was 0.20
       max_vel_y: 0.0
-      max_vel_theta: 0.8   # 2026-10-24 faster; was 0.6
-      min_speed_xy: 0.0
+      max_vel_theta: 0.5   # 2026-10-26: 0.8 made a +-50 deg slalom on straight paths (heavy robot reacts late on marble); 0.6 on 10-24
+      min_speed_xy: 0.03   # 2026-10-26: DWB applies min_speed_theta only when min_speed_xy > 0; with 0.0 it sent 0.11 rad/s
+                           # turns that could not move the robot (stuck 2 min)
       max_speed_xy: 0.24   # 2026-10-24 faster; was 0.20
-      min_speed_theta: 0.0
+      min_speed_theta: 0.4   # 2026-10-26: slower turns on the spot did not move the heavy robot on marble (wheels stalled, watchdog stop); was 0.0
       # Add high threshold velocity for turtlebot 3 issue.
       # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
-      acc_lim_x: 0.8   # heavy delivery body 2026-10-23 (was 2.5)
+      acc_lim_x: 0.4   # 2026-10-26 gentler, same as diff_cont (Arduino restarts); was 0.8
       acc_lim_y: 0.0
-      acc_lim_theta: 1.2   # heavy delivery body 2026-10-23 (was 3.2)
-      decel_lim_x: -0.8   # heavy delivery body 2026-10-23 (was -2.5)
+      acc_lim_theta: 0.6   # 2026-10-26 gentler; was 1.2
+      decel_lim_x: -0.4   # 2026-10-26 gentler; was -0.8
       decel_lim_y: 0.0
-      decel_lim_theta: -1.2   # heavy delivery body 2026-10-23 (was -3.2)
+      decel_lim_theta: -0.6   # 2026-10-26 gentler; was -1.2
       vx_samples: 20
       vy_samples: 5
       vtheta_samples: 20
-      sim_time: 1.7
+      sim_time: 1.7   # 1.2 tried 2026-10-26 for doorways: steering got more nervous (slalom), back to 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
@@ -140,11 +141,11 @@ controller_server:
       stateful: False   # 2026-10-23 - True made Foxy declare a NEW goal reached at once (the remembered "position reached" was not cleared)
       # ObstacleFootprint checks the whole body shape (local costmap footprint); BaseObstacle only the axle point
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      ObstacleFootprint.scale: 0.02
+      ObstacleFootprint.scale: 0.1   # 2026-10-26: prefer moves that keep the body away from door frames (was 0.02)
       PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
+      PathAlign.forward_point_distance: 0.3   # 2026-10-26: aiming 0.1 m ahead made the steering twitchy (Nav2 default 0.325)
       GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
+      GoalAlign.forward_point_distance: 0.3   # 2026-10-26 (was 0.1)
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
       RotateToGoal.scale: 32.0
@@ -172,7 +173,10 @@ local_costmap:
       # recovery then check where the back corners really swing, so a turn the other way is not ruled out like with
       # the circle (stuck 2026-10-24). Without the front margin the planner's clearance shrank to 10 cm and it
       # planned through 20 cm gaps beside boxes that the 34 cm wide robot cannot pass (real test 2026-10-24).
-      footprint: "[[0.18, 0.19], [0.18, -0.19], [-0.27, -0.19], [-0.27, 0.19]]"
+      # 2026-10-26: back 0.27 -> 0.28 (measured: 0.245 behind the axle, 0.33 long, 0.245 wide box). 0.31/0.21 after a
+      # curtain touch (weak battery + 6 s WiFi delay at the time) left no way through 45 cm doorways: 27 spins refused
+      # with "Collision Ahead" and 18 "No valid trajectories" in one trip.
+      footprint: "[[0.18, 0.19], [0.18, -0.19], [-0.28, -0.19], [-0.28, 0.19]]"
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -215,7 +219,7 @@ global_costmap:
       # 2026-10-24: the same body shape as the local costmap. With the old 0.29 circle here, the controller (which
       # knows the real shape) drove the nose close to a wall, and the planner then thought the robot was inside it
       # and could not plan any route from there (robot stuck in a corner, real test 2026-10-24).
-      footprint: "[[0.18, 0.19], [0.18, -0.19], [-0.27, -0.19], [-0.27, 0.19]]"
+      footprint: "[[0.18, 0.19], [0.18, -0.19], [-0.28, -0.19], [-0.28, 0.19]]"
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -229,6 +233,8 @@ global_costmap:
           clearing: True
           marking: True
           data_type: "LaserScan"
+          obstacle_range: 1.5   # 2026-10-26: plan round new obstacles only when close; a person 2 m ahead made the robot
+                                # take the long way at once instead of coming closer to pass beside him (was 2.5)
         blocked:              # spots scripts/path_guard.py remembers as blocked (survive "clear costmap")
           topic: /blocked_points
           data_type: "PointCloud2"
@@ -243,7 +249,8 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
+        cost_scaling_factor: 1.5   # 2026-10-26: cost falls off slower, so routes keep to the middle of passages and
+                                   # enter doorways straight instead of clipping the frame at an angle (was 3.0)
         inflation_radius: 0.55
       always_send_full_costmap: True
   global_costmap_client:
@@ -300,7 +307,7 @@ recoveries_server:
     simulate_ahead_time: 2.0
     max_rotational_vel: 0.6   # heavy delivery body 2026-10-23 (was 1.0)
     min_rotational_vel: 0.4
-    rotational_acc_lim: 1.2   # heavy delivery body 2026-10-23 (was 3.2)
+    rotational_acc_lim: 0.6   # 2026-10-26 gentler; was 1.2
 
 robot_state_publisher:
   ros__parameters:
