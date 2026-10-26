@@ -7,13 +7,25 @@ If another job is already waiting when one ends, the robot does NOT go home firs
 from where it is to the next sender (also when a new job arrives while it is on its way home).
 Set go_home_between_jobs:=true for the old behaviour (always home first), e.g. to compare the two.
 
+Which job next (2026-10-26): urgent jobs first, in the order they came; otherwise the job whose sender is nearest
+to the robot, but a job waiting longer than `max_wait` s goes first (oldest first), so nobody waits for ever.
+Cancel (/delivery_cancel, website id): a queued job is dropped; before the parcel is on board the robot simply
+does not go (next job or home); with the parcel on board it brings it back to the sender (WAIT_RETURNED).
+Emergency stop (/delivery_estop "stop"/"resume"): stops the robot at once (zero speed at teleop priority, Nav2
+goal cancelled) and continues the same leg on "resume".
+
 Topics (all plain ROS 2, so a website bridge can use them later):
-  in : /delivery_request   std_msgs/String  "cabin_A,cabin_D"  (optional 3rd field = website id: "cabin_A,cabin_D,-Nabc")
+  in : /delivery_request   std_msgs/String  "cabin_A,cabin_D"  (optional 3rd field = website id: "cabin_A,cabin_D,-Nabc",
+                                             optional 4th field "urgent")
+  in : /delivery_cancel    std_msgs/String  website id of the job to cancel
+  in : /delivery_estop     std_msgs/String  "stop" or "resume"
   in : /delivery_shipped   std_msgs/Empty   sender has loaded the parcel
   in : /delivery_received  std_msgs/Empty   receiver has taken the parcel
   in : /delivery_open_lid  std_msgs/Empty   the person at the robot wants the lid open (lid_buttons mode)
   in : /delivery_returned  std_msgs/Empty   the sender has taken an undeliverable parcel back out
-  out: /delivery_status    std_msgs/String  JSON: state, job, sender, destination, detail, queue, cargo, lid_buttons
+  out: /delivery_status    std_msgs/String  JSON: state, job, sender, destination, detail, queue, cargo, lid_buttons,
+                                             estop, cancelled_ref (a queued job that was dropped)
+  out: /cmd_vel_key        geometry_msgs/Twist  zero speed, 10 times a second, while the emergency stop is on
 
 Parcel box (needs cargo_controller.py running):
   -p cargo_lock:=true                       box opens by itself on arrival, closes before every drive
@@ -53,7 +65,7 @@ from collections import deque
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
@@ -95,6 +107,7 @@ class DeliveryManager(Node):
         self.declare_parameter('recheck_wait', 15.0)          # s to wait (blocked) before checking the routes again
         self.declare_parameter('return_to_sender', True)      # undeliverable parcel goes back to the sender
         self.declare_parameter('max_detours', 2)              # route switches on one leg before "every route blocked"
+        self.declare_parameter('max_wait', 300.0)             # s: a normal job waiting this long goes before nearer ones
         self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
                                                               # is really this close to the spot (0 = do not check)
 
@@ -117,6 +130,12 @@ class DeliveryManager(Node):
         self.create_subscription(Empty, '/delivery_shipped', self._on_shipped, 10)
         self.create_subscription(Empty, '/delivery_received', self._on_received, 10)
         self.create_subscription(Empty, '/delivery_returned', self._on_returned, 10)
+        self.create_subscription(String, '/delivery_cancel', self._on_cancel, 10)
+        self.create_subscription(String, '/delivery_estop', self._on_estop, 10)
+        self.stop_pub = self.create_publisher(Twist, '/cmd_vel_key', 10)   # emergency stop: above everything
+        self.estop = False
+        self.estop_target = None         # the leg to continue after "resume"
+        self.create_timer(0.1, self._hold_estop)
         # transient local: a late subscriber (e.g. the website bridge) still gets the last status
         status_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                 reliability=ReliabilityPolicy.RELIABLE)
@@ -158,6 +177,8 @@ class DeliveryManager(Node):
             self.get_logger().info('Path guard ENABLED (needs path_guard.py running)')
 
         self.state = IDLE
+        self.lid_opened = False       # someone opened the lid at the current stop (lid_buttons mode)
+        self.last_spot = self.home    # the last spot reached (for "nearest" when the live position is unknown)
         self.queue = deque()
         self.job = None
         self.next_id = 1
@@ -178,7 +199,7 @@ class DeliveryManager(Node):
         self._publish('Ready at %s. Waiting for requests.' % self.home)
 
     # ---------- status ----------
-    def _publish(self, detail, result=None, rejected_ref=None):
+    def _publish(self, detail, result=None, rejected_ref=None, cancelled_ref=None):
         # ref = the website's id for the CURRENT job; result = 'delivered' or 'failed' when a job ends;
         # rejected_ref = the id of a request that was refused (so the website can show why)
         msg = {'state': self.state,
@@ -187,17 +208,21 @@ class DeliveryManager(Node):
                'sender': self.job['sender'] if self.job else None,
                'destination': self.job['destination'] if self.job else None,
                'detail': detail, 'queue': len(self.queue),
-               'result': result, 'rejected_ref': rejected_ref,
+               'result': result, 'rejected_ref': rejected_ref, 'cancelled_ref': cancelled_ref,
+               'urgent': bool(self.job and self.job.get('urgent')), 'estop': self.estop,
                'cargo': self.cargo_state if self.cargo_enabled else None, 'lid_buttons': self.lid_buttons}
         self.status_pub.publish(String(data=json.dumps(msg)))
         self.last_publish = time.monotonic()
-        if result is None and rejected_ref is None:
+        if result is None and rejected_ref is None and cancelled_ref is None:
             self.last_detail = detail
         self.get_logger().info('[%s] %s' % (self.state, detail))
 
     # ---------- incoming messages ----------
     def _on_request(self, msg):
         parts = [p.strip() for p in msg.data.split(',')]
+        urgent = len(parts) == 4 and parts[3] == 'urgent'
+        if urgent:
+            parts = parts[:3]
         ref = parts[2] if len(parts) == 3 else None   # optional website id
         if ref is not None and ref in self.seen_refs:
             self.get_logger().info('Ignoring duplicate request %s' % ref)
@@ -212,11 +237,12 @@ class DeliveryManager(Node):
             return
         if ref is not None:
             self.seen_refs.add(ref)
-        job = {'id': self.next_id, 'sender': parts[0], 'destination': parts[1], 'ref': ref}
+        job = {'id': self.next_id, 'sender': parts[0], 'destination': parts[1], 'ref': ref, 'urgent': urgent,
+               'queued_at': time.monotonic()}
         self.next_id += 1
         self.queue.append(job)
-        self._publish('Job %d queued: %s -> %s (%d waiting)'
-                      % (job['id'], job['sender'], job['destination'], len(self.queue)))
+        self._publish('%sJob %d queued: %s -> %s (%d waiting)'
+                      % ('URGENT ' if urgent else '', job['id'], job['sender'], job['destination'], len(self.queue)))
 
     def _on_shipped(self, _msg):
         if self.state != WAIT_SHIPPED:
@@ -245,13 +271,75 @@ class DeliveryManager(Node):
             self.get_logger().warn('Ignoring "returned": state is %s' % self.state)
             return
         self.state = RETURNING
+        result = 'cancelled' if self.job.get('cancelled') else 'returned'
         if self.queue and not self.get_parameter('go_home_between_jobs').value:
             self._publish('Parcel of job %d returned to %s. Going straight to the next job (%d waiting)'
-                          % (self.job['id'], self.job['sender'], len(self.queue)), result='returned')
+                          % (self.job['id'], self.job['sender'], len(self.queue)), result=result)
         else:
             self._publish('Parcel of job %d returned to %s. Returning to %s'
-                          % (self.job['id'], self.job['sender'], self.home), result='returned')
+                          % (self.job['id'], self.job['sender'], self.home), result=result)
             self._go(self.home)
+
+    def _on_cancel(self, msg):
+        """The sender cancels a job (website id): drop it, skip it, or bring the parcel back."""
+        ref = msg.data.strip()
+        for job in list(self.queue):
+            if job.get('ref') == ref:
+                self.queue.remove(job)
+                self._publish('Job %d cancelled by the sender before it started.' % job['id'], cancelled_ref=ref)
+                return
+        if not self.job or self.job.get('ref') != ref:
+            self.get_logger().warn('Ignoring cancel for %s: not a waiting or current job' % ref)
+            return
+        if self.state == WAIT_SHIPPED and self.lid_buttons and self.lid_opened:
+            # the sender opened the lid and may have put the parcel in: never drive off with it locked inside
+            self.job['cancelled'] = True
+            self.state = WAIT_RETURNED
+            self.deadline = time.monotonic() + self.get_parameter('wait_received_timeout').value
+            self._publish('Cancelled by the sender. If the parcel is in the box, take it out, then tap '
+                          '"Close lid & done".')
+        elif self.state in (TO_PICKUP, WAIT_SHIPPED):            # nothing on board yet
+            self._abandon_goal()
+            self.estop_target = None
+            self.state = RETURNING
+            if self.queue and not self.get_parameter('go_home_between_jobs').value:
+                self._publish('Job %d cancelled by the sender. Going to the next job (%d waiting)'
+                              % (self.job['id'], len(self.queue)), result='cancelled')
+            else:
+                self._publish('Job %d cancelled by the sender. Returning to %s' % (self.job['id'], self.home),
+                              result='cancelled')
+                self._go(self.home)
+        elif self.state in (TO_DROPOFF, WAIT_RECEIVED):        # parcel on board: bring it back to the sender
+            self._abandon_goal()
+            self.job['cancelled'] = True
+            self.state = RETURN_TO_SENDER
+            self.estop_target = self.job['sender'] if self.estop else None
+            self._publish('Cancelled by the sender: bringing the parcel back to %s.' % self.job['sender'])
+            self._go(self.job['sender'])
+        else:
+            self.get_logger().info('Cancel for job %d ignored: the parcel is already going back' % self.job['id'])
+
+    def _on_estop(self, msg):
+        cmd = msg.data.strip().lower()
+        if cmd == 'stop' and not self.estop:
+            self.estop = True
+            moving = self.navigating or self.want_goal
+            self.estop_target = (self.want_goal or self._current_target()) if moving else None
+            self._abandon_goal()
+            self.stop_pub.publish(Twist())
+            self._publish('EMERGENCY STOP: the robot is stopped. Press Resume to continue.')
+        elif cmd == 'resume' and self.estop:
+            self.estop = False
+            target, self.estop_target = self.estop_target, None
+            if target:
+                self._publish('Emergency stop released. Continuing to %s.' % target)
+                self._go(target)
+            else:
+                self._publish('Emergency stop released.')
+
+    def _hold_estop(self):
+        if self.estop:                   # zero speed above Nav2, the guard, gap assist and self-recovery
+            self.stop_pub.publish(Twist())
 
     # ---------- parcel-box lock ----------
     def _on_localization(self, msg):
@@ -389,10 +477,11 @@ class DeliveryManager(Node):
             self._publish('FAILED job %d: could not reach %s (%s). Returning to %s with the parcel'
                           % (failed, target, why, home), result='failed')
             self._go(home)
-        else:                                    # on the way home
-            self.state = IDLE
-            self.job = None
-            self._publish('FAILED to reach %s (%s). Staying here.' % (target, why))
+        else:                                    # on the way home: never just stay somewhere (real test 2026-10-26:
+            # wedged at a door frame, "Staying here"); wait and try again, like a blocked route home
+            self.path_blocked, self.blocked_since = True, time.monotonic()
+            self._publish('Could not reach %s (%s). Trying again in %.0f s.'
+                          % (target, why, self.get_parameter('recheck_wait').value))
 
     def _on_open_lid(self, _msg):
         if not self.lid_buttons:
@@ -401,6 +490,7 @@ class DeliveryManager(Node):
         if self.state not in (WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED):
             self.get_logger().warn('Ignoring "open lid": state is %s' % self.state)
             return
+        self.lid_opened = True
         self._cargo('unlock')
 
     def _on_cargo_state(self, msg):
@@ -558,6 +648,8 @@ class DeliveryManager(Node):
         return self.home
 
     def _arrived(self):
+        self.last_spot = self._current_target()
+        self.lid_opened = False
         if self.state == TO_PICKUP:
             self.state = WAIT_SHIPPED
             self.deadline = time.monotonic() + self.get_parameter('wait_shipped_timeout').value
@@ -573,8 +665,11 @@ class DeliveryManager(Node):
         elif self.state == RETURN_TO_SENDER:
             self.state = WAIT_RETURNED
             self.deadline = time.monotonic() + self.get_parameter('wait_received_timeout').value
-            self._publish('Back at %s with the parcel (could not deliver it to %s). Please take it out.'
-                          % (self.job['sender'], self.job['destination']))
+            if self.job.get('cancelled'):
+                self._publish('Back at %s with the parcel (delivery cancelled). Please take it out.' % self.job['sender'])
+            else:
+                self._publish('Back at %s with the parcel (could not deliver it to %s). Please take it out.'
+                              % (self.job['sender'], self.job['destination']))
             if not self.lid_buttons:
                 self._cargo('unlock')
         elif self.state == RETURNING:
@@ -588,7 +683,7 @@ class DeliveryManager(Node):
 
         # a job is waiting while the robot heads home: skip the trip home and start the job from here.
         # (at least 1 s after the last status, so the website surely got the previous job's result)
-        if (self.state == RETURNING and self.queue and now - self.last_publish >= 1.0
+        if (self.state == RETURNING and self.queue and now - self.last_publish >= 1.0 and not self.estop
                 and not self.get_parameter('go_home_between_jobs').value):
             self._abandon_goal()
             self.state = IDLE
@@ -604,7 +699,8 @@ class DeliveryManager(Node):
             self._watch_goal(now)
 
         # send a wanted goal as soon as Nav2 is ready
-        if self.want_goal and not self.navigating and not self.lost and not self.motor_fault and not self.path_blocked \
+        if self.want_goal and not self.navigating and not self.lost and not self.motor_fault and not self.estop \
+                and not self.path_blocked \
                 and now >= self.hold_until \
                 and self._cargo_ready(now):
             if self.dry_run or self.client.server_is_ready():
@@ -626,13 +722,36 @@ class DeliveryManager(Node):
                           % (what, self.job['id'], self.home), result='failed')
             self._go(self.home)
 
-        # start the next job (first come, first served), not in the same instant as the previous status
-        if self.state == IDLE and self.queue and not self.lost and not self.motor_fault and now - self.last_publish >= 1.0:
-            self.job = self.queue.popleft()
+        # start the next job (see _next_job), not in the same instant as the previous status
+        if self.state == IDLE and self.queue and not self.lost and not self.motor_fault and not self.estop \
+                and now - self.last_publish >= 1.0:
+            self.job, why = self._next_job(now)
+            self.queue.remove(self.job)
             self.state = TO_PICKUP
-            self._publish('Starting job %d: %s -> %s'
-                          % (self.job['id'], self.job['sender'], self.job['destination']))
+            self._publish('Starting %sjob %d: %s -> %s%s'
+                          % ('URGENT ' if self.job['urgent'] else '', self.job['id'], self.job['sender'],
+                             self.job['destination'], why))
             self._go(self.job['sender'])
+
+    def _next_job(self, now):
+        """Urgent jobs first (first come, first served among them); then any job waiting longer than max_wait
+        (oldest first); otherwise the job whose sender is nearest to the robot (straight line)."""
+        urgent = [j for j in self.queue if j.get('urgent')]
+        if urgent:
+            return urgent[0], ''
+        waited = [j for j in self.queue if now - j['queued_at'] > self.get_parameter('max_wait').value]
+        if waited:
+            return waited[0], ' (waiting longest)'
+        if len(self.queue) == 1:
+            return self.queue[0], ''
+        dist = {j['id']: self._distance_to(j['sender']) for j in self.queue}
+        if any(d is None for d in dist.values()):          # live position unknown (dry run): from the last spot
+            here = self.locations[self.last_spot]
+            dist = {j['id']: math.hypot(float(self.locations[j['sender']]['x']) - float(here['x']),
+                                        float(self.locations[j['sender']]['y']) - float(here['y']))
+                    for j in self.queue}
+        job = min(self.queue, key=lambda j: dist[j['id']])
+        return job, (' (nearest sender, %.1f m away)' % dist[job['id']]) if job is not self.queue[0] else ''
 
     def stop(self):
         if self.goal_handle is not None:

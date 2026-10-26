@@ -6,8 +6,9 @@ so no Firebase package has to be installed and no key file is needed.
 
 Database layout (see web/index.html for the writer side):
   /requests/<id>  {sender, destination, senderName, receiverName, status, detail, shipped, received, created,
-                   lidSender, lidReceiver, returned, lidReturn}
-  /robot          {state, detail, queue, ref, lid, lidButtons, heartbeat}      written by this bridge
+                   lidSender, lidReceiver, returned, lidReturn, urgent, reason, cancel}
+  /robot          {state, detail, queue, ref, lid, lidButtons, estop, heartbeat}      written by this bridge
+  /control        {estop, by, t}   emergency stop, written by any member on the website
   /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
   /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
                   when -p map_yaml:=<map .yaml> is given (the website draws the map, the spots and the robot)
@@ -21,6 +22,10 @@ Flow:
   undeliverable parcel back at the sender: website sets lidReturn / returned = true
                                                    -> /delivery_open_lid, /delivery_returned (same check)
   the request's detail follows the manager's detail while the job runs (e.g. "the route is blocked ...")
+  website sets urgent = true (with a reason)         -> the request is forwarded as "sender,destination,<id>,urgent"
+  the sender sets cancel = true                      -> /delivery_cancel <id> (not yet forwarded: cancelled here)
+  /control/estop true/false                          -> /delivery_estop "stop"/"resume" (repeated until the manager's
+                                                        status shows the same; also after a restart of either)
 
 Login: the bridge signs in as robot@example.com; its password is read from ~/.delivery_robot_password
 (a private file outside the repo). Fallback to the old open database: --ros-args -p use_auth:=false
@@ -63,7 +68,7 @@ STATE_TO_STATUS = {'TO_PICKUP': 'going_to_sender', 'WAIT_SHIPPED': 'wait_shipped
                    'RETURN_TO_SENDER': 'returning', 'WAIT_RETURNED': 'wait_returned'}
 UNFINISHED = ('queued', 'going_to_sender', 'wait_shipped', 'going_to_destination', 'wait_received',
               'returning', 'wait_returned')
-FINAL = ('delivered', 'returned', 'failed', 'rejected')
+FINAL = ('delivered', 'returned', 'failed', 'rejected', 'cancelled')
 
 
 class FirebaseBridge(Node):
@@ -95,6 +100,10 @@ class FirebaseBridge(Node):
         self.received_pub = self.create_publisher(Empty, '/delivery_received', 10)
         self.returned_pub = self.create_publisher(Empty, '/delivery_returned', 10)
         self.open_lid_pub = self.create_publisher(Empty, '/delivery_open_lid', 10)
+        self.cancel_pub = self.create_publisher(String, '/delivery_cancel', 10)
+        self.estop_pub = self.create_publisher(String, '/delivery_estop', 10)
+        self.control = {}                # last /control read from the website (emergency stop)
+        self.last_estop_send = 0.0
         self.create_subscription(String, '/delivery_status', self._on_status, 10)
 
         self.lock = threading.Lock()
@@ -106,6 +115,7 @@ class FirebaseBridge(Node):
         self.sent_lid_receiver = set()
         self.sent_returned = set()
         self.sent_lid_return = set()
+        self.sent_cancel = set()
         self.written = {}                # request id -> last status we wrote
         self.written_detail = {}         # request id -> last detail we wrote
         self.out = queue.Queue()         # pending writes to Firebase
@@ -216,10 +226,12 @@ class FirebaseBridge(Node):
         while self.running:
             try:
                 reqs = self._http('GET', 'requests') or {}
+                control = self._http('GET', 'control') or {}
                 if self.net_ok is False:
                     self.get_logger().info('Connection to Firebase restored')
                 self.net_ok = True
                 self._process(reqs)
+                self._check_estop(control if isinstance(control, dict) else {})
             except Exception as exc:                      # network down, bad JSON, ...
                 if self.net_ok is not False:
                     self.get_logger().warn('Cannot reach Firebase (%s). Retrying...' % exc)
@@ -237,6 +249,15 @@ class FirebaseBridge(Node):
             if not isinstance(r, dict):
                 continue
             status = r.get('status')
+            if r.get('cancel') is True and rid not in self.sent_cancel and status not in FINAL:
+                self.sent_cancel.add(rid)
+                if status == 'pending' and rid not in self.forwarded:     # never reached the robot
+                    self.forwarded.add(rid)
+                    self._queue_patch(rid, 'cancelled', 'Cancelled by the sender.')
+                else:
+                    self.cancel_pub.publish(String(data=rid))
+                    self.get_logger().info('Cancel forwarded for %s' % rid)
+                continue
             if status == 'pending' and rid not in self.forwarded:
                 self._forward(rid, r)
             # "Open lid" first, so presses reach the manager in the order people make them
@@ -259,9 +280,23 @@ class FirebaseBridge(Node):
         if not (NAME_RE.match(sender) and NAME_RE.match(dest)):
             self._queue_patch(rid, 'rejected', 'Invalid request')
             return
-        self.request_pub.publish(String(data='%s,%s,%s' % (sender, dest, rid)))
-        self.get_logger().info('Request %s forwarded: %s -> %s' % (rid, sender, dest))
+        urgent = r.get('urgent') is True
+        self.request_pub.publish(String(data='%s,%s,%s%s' % (sender, dest, rid, ',urgent' if urgent else '')))
+        self.get_logger().info('%sRequest %s forwarded: %s -> %s' % ('URGENT ' if urgent else '', rid, sender, dest))
         self._queue_patch(rid, 'queued', 'In the queue')
+
+    def _check_estop(self, control):
+        """Pass the website's emergency stop on until the manager reports the same state."""
+        self.control = control
+        want = control.get('estop') is True
+        with self.lock:
+            st = self.last_status
+        if st is None or bool(st.get('estop')) == want or time.monotonic() - self.last_estop_send < 2.0:
+            return
+        self.last_estop_send = time.monotonic()
+        self.estop_pub.publish(String(data='stop' if want else 'resume'))
+        self.get_logger().warn('Emergency stop %s (pressed by %s)' % ('ON' if want else 'released',
+                                                                    str(control.get('by', '?'))[:60]))
 
     def _press(self, needed_state, rid, publisher, sent_set):
         """Forward a button press only while the manager waits for exactly this request."""
@@ -283,10 +318,13 @@ class FirebaseBridge(Node):
         rej = st.get('rejected_ref')
         if rej:
             self._queue_patch(rej, 'rejected', st.get('detail', 'Rejected'))
+        can = st.get('cancelled_ref')
+        if can:
+            self._queue_patch(can, 'cancelled', 'Cancelled by the sender.')
         ref, result = st.get('ref'), st.get('result')
         if ref:
             if result:
-                status = result if result in ('delivered', 'returned') else 'failed'
+                status = result if result in ('delivered', 'returned', 'cancelled') else 'failed'
             else:
                 status = STATE_TO_STATUS.get(st.get('state'))
             detail = st.get('detail', '')
@@ -361,7 +399,7 @@ class FirebaseBridge(Node):
             st = self.last_status or {}
         return {'state': st.get('state', 'UNKNOWN'), 'detail': st.get('detail', ''),
                 'queue': st.get('queue', 0), 'ref': st.get('ref'),
-                'lid': st.get('cargo'), 'lidButtons': bool(st.get('lid_buttons')),
+                'lid': st.get('cargo'), 'lidButtons': bool(st.get('lid_buttons')), 'estop': bool(st.get('estop')),
                 'heartbeat': {'.sv': 'timestamp'}}
 
     def _writer_loop(self):

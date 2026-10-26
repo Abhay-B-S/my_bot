@@ -24,10 +24,19 @@
       ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
     },
 
+    "control": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      "estop": { ".validate": "newData.isBoolean()" },
+      "by": { ".validate": "newData.isString() && newData.val().length < 60" },
+      "t": { ".validate": "newData.isNumber()" },
+      "$other": { ".validate": false }
+    },
+
     "requests": {
       ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
       "$id": {
-        ".write": "auth != null && (root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot' || (!data.exists() && newData.exists() && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == newData.child('sender').val() && newData.child('sender').val() != newData.child('destination').val() && newData.child('status').val() == 'pending' && !newData.child('shipped').exists() && !newData.child('received').exists() && !newData.child('lidSender').exists() && !newData.child('lidReceiver').exists() && !newData.child('returned').exists() && !newData.child('lidReturn').exists()))",
+        ".write": "auth != null && (root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot' || (!data.exists() && newData.exists() && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == newData.child('sender').val() && newData.child('sender').val() != newData.child('destination').val() && newData.child('status').val() == 'pending' && !newData.child('shipped').exists() && !newData.child('received').exists() && !newData.child('lidSender').exists() && !newData.child('lidReceiver').exists() && !newData.child('returned').exists() && !newData.child('lidReturn').exists() && !newData.child('cancel').exists() && (newData.child('urgent').val() != true || newData.child('reason').exists())))",
 
         "sender": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
         "destination": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
@@ -36,6 +45,12 @@
         "status": { ".validate": "newData.isString() && newData.val().length < 40" },
         "detail": { ".validate": "newData.isString() && newData.val().length < 400" },
         "created": { ".validate": "newData.isNumber()" },
+        "urgent": { ".validate": "newData.isBoolean()" },
+        "reason": { ".validate": "newData.isString() && newData.val().length >= 3 && newData.val().length < 120" },
+        "cancel": {
+          ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('sender').val() && (data.parent().child('status').val() == 'pending' || data.parent().child('status').val() == 'queued' || data.parent().child('status').val() == 'going_to_sender' || data.parent().child('status').val() == 'wait_shipped' || data.parent().child('status').val() == 'going_to_destination' || data.parent().child('status').val() == 'wait_received') && newData.val() == true",
+          ".validate": "newData.val() == true"
+        },
 
         "shipped": {
           ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('cabin').val() == data.parent().child('sender').val() && data.parent().child('status').val() == 'wait_shipped' && newData.val() == true",

@@ -65,6 +65,17 @@
   /* live map */
   #mapCanvas { display: block; margin: 0 auto; border-radius: 10px; border: 1px solid var(--line); }
   #mapText { margin-top: 8px; }
+  /* emergency stop, urgent requests, cancel */
+  button.danger { background: var(--bad); color: #ffffff; }
+  button.quiet { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
+  .stopped { background: var(--bad-bg); color: var(--bad); border-radius: 10px; padding: 10px 12px;
+             margin-top: 10px; font-weight: 700; }
+  #urgentBox { border: 2px solid var(--bad); border-radius: 12px; padding: 10px 12px; margin-top: 10px; }
+  #urgentBox p { margin: 0 0 6px; font-size: .9rem; }
+  .tick { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; font-size: .9rem; color: var(--text); }
+  .tick input { width: auto; margin-top: 3px; }
+  .chip.urgent { background: var(--bad); color: #ffffff; margin-left: 6px; }
+  button.cancel { background: none; color: var(--bad); border: 1px solid var(--bad); padding: 8px; font-size: .9rem; }
 </style>
 </head>
 <body>
@@ -84,9 +95,16 @@
 
   <!-- The app: shown after login -->
   <div id="app" class="hidden">
-    <div class="card" id="robot">
-      <span class="dot" id="dot"></span>
-      <div><strong id="robotName">Robot</strong><div id="robotText" class="muted">Connecting...</div></div>
+    <div class="card">
+      <div id="robot">
+        <span class="dot" id="dot"></span>
+        <div><strong id="robotName">Robot</strong><div id="robotText" class="muted">Connecting...</div></div>
+      </div>
+      <div id="stoppedBox" class="hidden">
+        <div class="stopped" id="stoppedText">EMERGENCY STOP</div>
+        <button id="resume" class="quiet" type="button">Resume the robot</button>
+      </div>
+      <button id="estop" class="danger" type="button">⛔ Emergency stop</button>
     </div>
 
 
@@ -99,6 +117,14 @@
       <h2 style="margin-top:16px">Send a parcel</h2>
       <label for="to">Send to</label>
       <select id="to"></select>
+      <button id="urgentLink" class="link" type="button">Urgent delivery…</button>
+      <div id="urgentBox" class="hidden">
+        <p><strong>Urgent deliveries go before everyone else's.</strong> Use this only when it really cannot wait.
+           Your reason is shown with the request.</p>
+        <label for="reason">Why is it urgent?</label>
+        <input id="reason" maxlength="110" placeholder="e.g. exam papers needed in 10 minutes">
+        <label class="tick"><input id="urgentOk" type="checkbox"> Yes, this delivery is urgent</label>
+      </div>
       <button id="send">Request delivery</button>
       <div id="msg" class="muted"></div>
     </div>
@@ -169,11 +195,12 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
   returned: ["Returned to the sender", "bad"],
   failed: ["Delivery failed", "bad"],
   rejected: ["Request rejected", "bad"],
+  cancelled: ["Cancelled", "bad"],
 };
 
 const $ = id => document.getElementById(id);
 let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, lastDetail = {}, unsub = [];
-let mapInfo = null, mapImg = null, pose = null;
+let mapInfo = null, mapImg = null, pose = null, control = {};
 
 function cabinLabel(c) { return c.replace("_", " "); }
 function el(tag, cls, text) {
@@ -234,6 +261,7 @@ auth.onAuthStateChanged(user => {
   listen(db.ref("requests").limitToLast(50), s => { requests = s.val() || {}; render(); });
   listen(db.ref("map"), s => { mapInfo = s.val(); loadMapImage(); });
   listen(db.ref("pose"), s => { pose = s.val(); drawMap(); });
+  listen(db.ref("control"), s => { control = s.val() || {}; renderRobot(); });
 });
 
 function listen(ref, cb) {
@@ -243,16 +271,58 @@ function listen(ref, cb) {
 }
 
 // ---------- actions ----------
+// urgent: hidden behind a link, needs a reason and a tick, so it is not pressed by mistake
+function urgentChosen() { return !$("urgentBox").classList.contains("hidden") && $("urgentOk").checked; }
+function updateSendButton() {
+  const u = urgentChosen();
+  $("send").textContent = u ? "Request URGENT delivery" : "Request delivery";
+  $("send").className = u ? "danger" : "";
+}
+$("urgentLink").onclick = () => {
+  const open = $("urgentBox").classList.toggle("hidden") === false;
+  $("urgentLink").textContent = open ? "Not urgent" : "Urgent delivery…";
+  if (!open) { $("urgentOk").checked = false; $("reason").value = ""; }
+  updateSendButton();
+};
+$("urgentOk").onchange = updateSendButton;
+
 $("send").onclick = () => {
-  const to = $("to")._items[+$("to").value], btn = $("send");
+  const to = $("to")._items[+$("to").value], btn = $("send"), urgent = urgentChosen();
+  const reason = $("reason").value.trim();
+  if (urgent && reason.length < 3) { $("msg").textContent = "Please write why it is urgent."; return; }
   btn.disabled = true;
-  db.ref("requests").push({
+  const r = {
     sender: current.cabin, destination: to.cabin,
     senderName: current.name, receiverName: to.name,
     status: "pending", detail: "", created: firebase.database.ServerValue.TIMESTAMP
-  }).then(() => { $("msg").textContent = "Request sent."; })
-    .catch(e => { $("msg").textContent = "Could not send: " + e.message; })
+  };
+  if (urgent) { r.urgent = true; r.reason = reason; }
+  db.ref("requests").push(r).then(() => {
+    $("msg").textContent = urgent ? "Urgent request sent." : "Request sent.";
+    if (urgent) $("urgentLink").onclick();             // close the urgent box again
+  }).catch(e => { $("msg").textContent = "Could not send: " + e.message; })
     .finally(() => { setTimeout(() => { btn.disabled = false; $("msg").textContent = ""; }, 2500); });
+};
+
+// cancel: only the sender, with a question that says what will happen
+const CANCELLABLE = ["pending", "queued", "going_to_sender", "wait_shipped", "going_to_destination", "wait_received"];
+function cancelTrip(id, r) {
+  const onBoard = ["going_to_destination", "wait_received"].includes(r.status);
+  const q = onBoard ? "Cancel this delivery? The robot will bring the parcel back to you."
+                    : "Cancel this delivery? The robot will not come for it.";
+  if (!confirm(q)) return;
+  db.ref("requests/" + id + "/cancel").set(true).catch(e => { $("msg").textContent = "Could not cancel: " + e.message; });
+}
+
+// emergency stop: one tap stops (it must be quick); resuming asks first
+$("estop").onclick = () => {
+  db.ref("control").set({ estop: true, by: current.name, t: firebase.database.ServerValue.TIMESTAMP })
+    .catch(e => { $("msg").textContent = "Could not stop: " + e.message; });
+};
+$("resume").onclick = () => {
+  if (!confirm("Is it safe for the robot to move again?")) return;
+  db.ref("control").set({ estop: false, by: current.name, t: firebase.database.ServerValue.TIMESTAMP })
+    .catch(e => { $("msg").textContent = "Could not resume: " + e.message; });
 };
 
 function press(id, field) {
@@ -450,8 +520,13 @@ function render() {
   ids.forEach(id => {
     const r = requests[id], card = el("div", "req");
     card.appendChild(el("div", "route", (r.senderName || r.sender) + " → " + (r.receiverName || r.destination)));
-    const s = STATUS[r.status] || [r.status, ""];
+    let s = STATUS[r.status] || [r.status, ""];
+    if (r.cancel && r.status === "returning") s = ["Cancelled: bringing the parcel back to the sender", "bad"];
+    else if (r.cancel && r.status === "wait_returned") s = ["Cancelled: please take the parcel out", "warn"];
+    else if (r.cancel && CANCELLABLE.includes(r.status)) s = ["Cancelling...", "warn"];
     card.appendChild(el("span", "chip " + s[1], s[0]));
+    if (r.urgent) card.appendChild(el("span", "chip urgent", "URGENT"));
+    if (r.urgent && r.reason) card.appendChild(el("div", "muted", "Why urgent: " + r.reason));
     if (r.status === "wait_shipped" && r.sender === mine && !r.shipped && lidMode()) {
       lidSteps(card, id, r.lidSender, "lidSender", "shipped", "put the parcel in", "Close lid & send");
     } else if (r.status === "wait_shipped" && r.sender === mine && !r.shipped) {
@@ -467,7 +542,8 @@ function render() {
     } else if (r.status === "wait_returned" && r.sender === mine && !r.returned && lidMode()) {
       lidSteps(card, id, r.lidReturn, "lidReturn", "returned", "take your parcel back out", "Close lid & done");
     } else if (r.status === "wait_returned" && r.sender === mine && !r.returned) {
-      card.appendChild(el("div", "alert", "The robot could not deliver your parcel and brought it back. Take it out, then press Parcel taken back."));
+      card.appendChild(el("div", "alert", r.cancel ? "Delivery cancelled. Take your parcel out of the box, then press Parcel taken back."
+        : "The robot could not deliver your parcel and brought it back. Take it out, then press Parcel taken back."));
       const b = el("button", "big", "Parcel taken back"); b.onclick = () => { b.disabled = true; press(id, "returned"); };
       card.appendChild(b);
     } else if (r.status === "delivered") {
@@ -475,13 +551,17 @@ function render() {
     } else if (r.detail && r.status !== "pending" && r.status !== "queued") {
       card.appendChild(el("div", "muted", r.detail));   // why it failed, or e.g. "the route is blocked ..."
     }
+    if (r.sender === mine && CANCELLABLE.includes(r.status) && !r.cancel) {
+      const c = el("button", "cancel", "Cancel this delivery"); c.onclick = () => cancelTrip(id, r);
+      card.appendChild(c);
+    }
     list.appendChild(card);
     // Beep when it is this person's turn (also the first time they see it), and when their parcel is
     // delivered or a delivery fails.
     const key = mine + ":" + id, seen = key in lastStatus;
     const act = (r.status === "wait_shipped" && r.sender === mine) || (r.status === "wait_received" && r.destination === mine) ||
                 (r.status === "wait_returned" && r.sender === mine);
-    const done = (r.status === "delivered" && r.sender === mine) || ["failed", "returning", "returned"].includes(r.status);
+    const done = (r.status === "delivered" && r.sender === mine) || ["failed", "returning", "returned", "cancelled"].includes(r.status);
     // a blocked route is news for both people (also while the status itself stays the same)
     const blocked = seen && r.detail !== lastDetail[key] && /blocked/i.test(r.detail || "");
     if ((lastStatus[key] !== r.status && (act || (done && seen))) || blocked) beep(act ? "arrive" : "done");
@@ -494,6 +574,13 @@ function renderRobot() {
   const dot = $("dot"), txt = $("robotText");
   const online = robot && robot.heartbeat && (Date.now() + offset - robot.heartbeat) < 20000;
   dot.className = "dot " + (online ? "on" : "off");
+  const stopped = !!(control && control.estop);
+  $("stoppedBox").classList.toggle("hidden", !stopped);
+  $("estop").classList.toggle("hidden", stopped);
+  if (stopped) {
+    $("stoppedText").textContent = "EMERGENCY STOP by " + (control.by || "someone") +
+      (robot && robot.estop ? ". The robot is stopped." : ". Stopping the robot...");
+  }
   if (!robot) { txt.textContent = "No robot information yet."; return; }
   txt.textContent = online ? (robot.detail || robot.state) : "Robot system is offline.";
 }

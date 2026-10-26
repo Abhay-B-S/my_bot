@@ -40,41 +40,63 @@ from tf2_ros import Buffer, TransformListener
 IDLE, TURNING, SETTLE, DRIVING = 'idle', 'turning', 'settle', 'driving'
 
 
-def body_hits(pts, front, back, half, angle=0.0):
-    """True if any point (robot frame, Nx2) lies inside the body rectangle turned by `angle` round the axle."""
+def grow(body, margin):
+    """Body shape (front, back, box_half, wheel_half_len, wheel_out) with `margin` m added all round."""
+    f, b, box, wl, wo = body
+    return (f + margin, b + margin, box + margin, wl + margin, wo + margin)
+
+
+def body_hits(pts, shape, angle=0.0):
+    """True if any point (robot frame, Nx2) lies inside the body turned by `angle` round the axle.
+    The body is the box (front..back, +-box_half) plus the two wheels (+-wheel_half_len along, out to wheel_out):
+    only the wheels stick out past the box, so next to a wall the box can still turn (real test 2026-10-26)."""
     if len(pts) == 0:
         return False
+    f, b, box, wl, wo = shape
     c, s = math.cos(angle), math.sin(angle)
     x = pts[:, 0] * c + pts[:, 1] * s           # points in the turned body's frame
-    y = -pts[:, 0] * s + pts[:, 1] * c
-    return bool(np.any((x < front) & (x > -back) & (np.abs(y) < half)))
+    y = np.abs(-pts[:, 0] * s + pts[:, 1] * c)
+    in_box = (x < f) & (x > -b) & (y < box)
+    in_wheel = (np.abs(x) < wl) & (y < wo)
+    return bool(np.any(in_box | in_wheel))
 
 
-def can_turn(pts, front, back, half, angle, step=math.radians(3)):
+def can_turn(pts, shape, angle, step=math.radians(3)):
     """True if the body can turn on the spot from 0 to `angle` without touching any point."""
     n = max(1, int(abs(angle) / step))
-    return not any(body_hits(pts, front, back, half, angle * i / n) for i in range(1, n + 1))
+    return not any(body_hits(pts, shape, angle * i / n) for i in range(1, n + 1))
 
 
-def straight_free(pts, front, back, half, angle, limit):
-    """How far (m, up to `limit`) the body can drive straight after turning to `angle`."""
+def straight_free(pts, shape, angle, limit):
+    """How far (m, up to `limit`) the body can drive straight after turning to `angle` (strip as wide as the
+    wheels, starting at the front of the box or the wheels, whichever a point would meet first)."""
+    f, b, box, wl, wo = shape
     c, s = math.cos(angle), math.sin(angle)
     x = pts[:, 0] * c + pts[:, 1] * s
-    y = -pts[:, 0] * s + pts[:, 1] * c
-    ahead = x[(np.abs(y) < half) & (x >= front)]
-    return float(min(limit, ahead.min() - front)) if len(ahead) else limit
+    y = np.abs(-pts[:, 0] * s + pts[:, 1] * c)
+    gaps = []
+    in_box_lane = (y < box) & (x >= f)
+    if in_box_lane.any():
+        gaps.append((x[in_box_lane] - f).min())
+    in_wheel_lane = (y >= box) & (y < wo) & (x >= wl)
+    if in_wheel_lane.any():
+        gaps.append((x[in_wheel_lane] - wl).min())
+    return float(min([limit] + gaps))
 
 
-def choose(pts, route_angle, body, margin, max_turn, min_drive, limit):
-    """Best heading (rad, robot frame) and its free distance, or None. Prefers headings close to the route."""
-    front, back, half = body[0] + margin, body[1] + margin, body[2] + margin
+def choose(pts, route_angle, body, margin, max_turn, min_drive, limit, turn_sign=0):
+    """Best heading (rad, robot frame) and its free distance, or None. Prefers headings close to the route.
+    turn_sign -1/+1: only turns to the right/left (away from a wall the robot already touches)."""
+    shape = grow(body, margin)
     best = None
     for deg in range(-int(max_turn), int(max_turn) + 1, 5):
         a = route_angle + math.radians(deg)
         a = math.atan2(math.sin(a), math.cos(a))
-        if not can_turn(pts, front, back, half, a):
+        if turn_sign and a * turn_sign <= 0:
             continue
-        free = straight_free(pts, front, back, half, a, limit)
+        if not can_turn(pts, shape, a):
+            continue
+        free = straight_free(pts, shape, a, limit)
         if free < min_drive:
             continue
         score = free - 0.35 * abs(math.radians(deg)) - 0.1 * abs(a)    # long straight, close to route, little turning
@@ -89,9 +111,15 @@ class GapAssist(Node):
         defaults = {
             'body_front': 0.085,      # m in front of the axle (measured 2026-10-26)
             'body_back': 0.245,       # m behind the axle
+            'box_half_width': 0.1225, # m: the box is 0.245 m wide (measured 2026-10-26)
+            'wheel_half_length': 0.035,  # m: wheels (radius 0.034 m) stick out only this far ahead/behind the axle
             'body_half_width': 0.156, # m from the centre to the outside of a wheel
             'margin': 0.03,           # m kept free round the real body
             'margin_tight': 0.015,    # m, tried only when nothing fits with `margin` (lidar X2: about +-1-2 cm)
+            'margin_away': -0.006,    # m, last try, only turning AWAY from the nearest point: a robot whose wheel
+                                      # already touches a frame (lidar: 0.16 m from the axle, wheel 0.156 m; real test
+                                      # 2026-10-26) cannot keep any margin, but a wheel turning on the spot stays on
+                                      # its own circle, and a 15 deg turn away by hand freed it. -6 mm = lidar noise.
             'stuck_seconds': 2.0,     # no movement for this long while Nav2 is "stuck"
             'max_turn_deg': 60.0,     # headings tried on each side of the planned route
             'route_look_ahead': 0.7,  # m along the plan for the route direction
@@ -107,7 +135,8 @@ class GapAssist(Node):
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.p = {k: self.get_parameter(k).value for k in defaults}
-        self.body = (self.p['body_front'], self.p['body_back'], self.p['body_half_width'])
+        self.body = (self.p['body_front'], self.p['body_back'], self.p['box_half_width'],
+                     self.p['wheel_half_length'], self.p['body_half_width'])
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
         self.tf = Buffer()
@@ -132,7 +161,8 @@ class GapAssist(Node):
         self.state, self.target, self.until = IDLE, 0.0, 0.0
         self.create_timer(0.05, self._tick)
         self._status('watching')
-        self.get_logger().info('Gap assist ready: body %.3f/%.3f/%.3f m + %.2f m margin' % (*self.body, self.p['margin']))
+        self.get_logger().info('Gap assist ready: box %.3f/%.3f/%.3f m, wheels +-%.3f m to %.3f m, + %.2f m margin'
+                               % (*self.body, self.p['margin']))
 
     # ---------- inputs ----------
     def _on_scan(self, s):
@@ -178,8 +208,8 @@ class GapAssist(Node):
         yaw = 2 * math.atan2(q.z, q.w)
         tx, ty = t.transform.translation.x, t.transform.translation.y
         pts = np.stack([tx + px * math.cos(yaw) - py * math.sin(yaw), ty + px * math.sin(yaw) + py * math.cos(yaw)], 1)
-        f, b, h = self.body
-        inside = (pts[:, 0] < f) & (pts[:, 0] > -b) & (np.abs(pts[:, 1]) < h)     # the robot's own parts
+        f, b, box = self.body[:3]
+        inside = (pts[:, 0] < f) & (pts[:, 0] > -b) & (np.abs(pts[:, 1]) < box)   # the robot's own parts
         return pts[~inside]
 
     def _route_angle(self):
@@ -253,6 +283,13 @@ class GapAssist(Node):
                           self.p['drive_distance'])
             if best is not None:
                 break
+        if best is None and len(pts):                 # already at a wall: only turn away from it
+            near = pts[int(np.argmin(np.hypot(pts[:, 0], pts[:, 1])))]
+            away = -1 if near[1] > 0 else 1           # wall on the left -> turn right, and the other way round
+            best = choose(pts, route, self.body, self.p['margin_away'], 90.0, self.p['min_drive'],
+                          self.p['drive_distance'], turn_sign=away)
+            if best is not None:
+                self.get_logger().info('touching on the %s: turning away from it' % ('left' if away < 0 else 'right'))
         if best is None:
             return self._finish('no safe way to line up here; Nav2 or a person must help')
         angle, free, _ = best
@@ -277,10 +314,10 @@ class GapAssist(Node):
         d = self.odom[2] - self.last_yaw
         self.turned += math.atan2(math.sin(d), math.cos(d))
         self.last_yaw = self.odom[2]
-        f, b, h = (v + self.p['margin'] / 3 for v in self.body)        # live check: never let a point inside
+        shape = grow(self.body, min(0.0, self.p['margin_away']))       # live check while turning
         pts = self._points()
         nxt = math.copysign(math.radians(4), self.target)
-        if pts is not None and body_hits(pts, f, b, h, nxt):
+        if pts is not None and body_hits(pts, shape, nxt):
             return self._finish('stopped turning: something is close to the body')
         if abs(self.turned) >= abs(self.target) - math.radians(3) or now > self.until:
             self._stop()
@@ -293,8 +330,7 @@ class GapAssist(Node):
     def _drive(self, now):
         done = math.hypot(self.odom[0] - self.start[0], self.odom[1] - self.start[1])
         pts = self._points()
-        f, b, h = (v + self.p['margin'] / 2 for v in self.body)
-        if pts is not None and straight_free(pts, f, b, h, 0.0, 0.2) < 0.06:
+        if pts is not None and straight_free(pts, grow(self.body, self.p['margin'] / 2), 0.0, 0.2) < 0.06:
             return self._finish('stopped: something ahead (drove %.2f m)' % done)
         if done >= self.drive_left or now > self.until:
             return self._finish('through the gap (drove %.2f m); Nav2 continues' % done)
