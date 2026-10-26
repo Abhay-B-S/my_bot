@@ -146,7 +146,8 @@ class Explorer(Node):
     def __init__(self):
         super().__init__('explorer')
         defaults = {
-            'clearance': 0.30,         # m from walls for standing points (the back swings 0.29 m when turning)
+            'clearance': 0.35,         # m from walls for standing points (the back swings 0.29 m when turning; 0.30 put
+                                       # targets next to furniture where Nav2 could not turn, real test 2026-10-26)
             'min_frontier': 0.40,      # m: shorter frontier clusters are ignored
             'piece': 1.5,              # m: long frontiers are cut into pieces this size (one target each)
             'blind_radius': 0.6,       # m round the robot: unknown cells there are its own blind spot, not a frontier
@@ -157,6 +158,8 @@ class Explorer(Node):
             'replan_seconds': 3.0,     # how often the current target is checked while driving
             'goal_timeout': 90.0,      # s for one target
             'max_minutes': 20.0,       # stop exploring after this long
+            'tries': 2,                # attempts per target before it is blacklisted
+            'second_pass': True,       # when only blacklisted frontiers are left, forget the list once and retry
             'start_delay': 5.0,        # s for slam_toolbox to publish a first map
             'map_name': '',            # save the map here when done ('' = do not save)
             'return_home': True,
@@ -169,6 +172,9 @@ class Explorer(Node):
         self.tf = Buffer()
         TransformListener(self.tf, self)
         self.create_subscription(OccupancyGrid, '/map', self._on_map, latched)
+        # a motor fault restarts the wheel odometry at zero, and the map is then glued together wrongly (three
+        # rotated pieces, real test 2026-10-26): stop at once and keep the map made so far
+        self.create_subscription(String, '/safety_event', self._on_safety, 10)
         self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.status_pub = self.create_publisher(String, '/explore_status', latched)
         self.marker_pub = self.create_publisher(Marker, '/explore_frontiers', 10)
@@ -177,6 +183,8 @@ class Explorer(Node):
         self.map = None
         self.start_pose = None
         self.blacklist = []           # (x, y) in the map frame
+        self.failures = {}            # rounded target -> failed attempts
+        self.passes = 1
         self.goal_handle = None
         self.goal_sent_at = 0.0
         self.target = None            # (x, y, cluster cells as map points) being driven to
@@ -195,6 +203,12 @@ class Explorer(Node):
 
     def _on_map(self, m):
         self.map = m
+
+    def _on_safety(self, msg):
+        if msg.data.startswith('SAFETY STOP') and self.state in ('choose', 'driving'):
+            self.p['return_home'] = False          # the odometry is about to jump: no trip home on a broken map
+            self._finish('motor fault (%s): map saved up to here; it may be broken after this point, please map '
+                         'again' % msg.data[13:80])
 
     def _robot(self):
         try:
@@ -287,8 +301,10 @@ class Explorer(Node):
             j = cand[int(np.argmin(dist[rr[cand], cc[cand]] + near[cand] / res))]
             gx, gy = ox + (cc[j] + 0.5) * res, oy + (rr[j] + 0.5) * res
             drive = dist[rr[j], cc[j]] * res
-            yaw = math.atan2(cy - gy, cx - gx)                      # face the unknown side
-            heading = math.atan2(gy - robot[1], gx - robot[0]) if drive > 0.2 else yaw
+            # arrive in the driving direction: the lidar sees all round, and a final turn on the spot next to
+            # furniture is what the robot (long back) and Nav2 Foxy fail at (7 of 10 targets, real test 2026-10-26)
+            heading = math.atan2(gy - robot[1], gx - robot[0]) if drive > 0.2 else robot[2]
+            yaw = heading
             turn = abs(math.atan2(math.sin(heading - robot[2]), math.cos(heading - robot[2])))
             length = len(cells) * res
             score = self.p['gain_weight'] * length - drive - self.p['turn_weight'] * turn
@@ -344,6 +360,11 @@ class Explorer(Node):
             if (now - self.t0) / 60 > self.p['max_minutes']:
                 return self._finish('time limit reached')
             best = self._choose(robot)
+            if best is None and self.p['second_pass'] and self.passes == 1 and self.blacklist:
+                self.passes = 2
+                self.get_logger().info('only failed targets left: trying them once more (%d)' % (len(self.blacklist) // 2))
+                self.blacklist, self.failures = [], {}
+                best = self._choose(robot)
             if best is None:
                 return self._finish('no unexplored frontier left')
             score, gx, gy, yaw, cells, length, drive, centre = best
@@ -357,10 +378,21 @@ class Explorer(Node):
         elif self.state == 'driving':
             result = getattr(self, 'goal_result', None)
             if result is not None:
-                if result != GoalStatus.STATUS_SUCCEEDED:
+                if result == GoalStatus.STATUS_SUCCEEDED and self._target_still_open():
+                    # reached, but the unknown area is still unknown (behind furniture, out of the lidar's sight):
+                    # going there again only nudges the robot along the wall (targets 45-47, real test 2026-10-26)
                     self.blacklist += [self.target[:2], self.target[3]]
-                    self.get_logger().warn('target (%.2f, %.2f) not reached (status %d): blacklisted'
-                                           % (self.target[0], self.target[1], result))
+                    self.get_logger().info('target reached but its area cannot be seen from there: skipped')
+                elif result != GoalStatus.STATUS_SUCCEEDED:
+                    key = (round(self.target[0], 1), round(self.target[1], 1))
+                    self.failures[key] = self.failures.get(key, 0) + 1
+                    if self.failures[key] >= self.p['tries']:
+                        self.blacklist += [self.target[:2], self.target[3]]
+                        self.get_logger().warn('target (%.2f, %.2f) not reached (status %d): blacklisted'
+                                               % (self.target[0], self.target[1], result))
+                    else:
+                        self.get_logger().info('target (%.2f, %.2f) not reached (status %d): will try again'
+                                               % (self.target[0], self.target[1], result))
                 self.targets_done += 1
                 self.state = 'choose'
             elif now - self.goal_sent_at > self.p['goal_timeout']:

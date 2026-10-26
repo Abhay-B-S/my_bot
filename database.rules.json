@@ -4,9 +4,22 @@
     ".write": false,
 
     "members": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
       "$id": {
-        ".read": "auth != null && auth.token.email == $id + '@example.com'"
+        ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'admin' && $id != 'admin' && $id != 'robot' && !data.child('role').exists()",
+        ".validate": "$id.matches(/^[a-z0-9]{3,20}$/) && newData.hasChildren(['name', 'cabin'])",
+        "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length < 60" },
+        "cabin": { ".validate": "newData.isString() && newData.val().matches(/^cabin_[A-Z]$/)" },
+        "$other": { ".validate": false }
       }
+    },
+
+    "settings": {
+      ".read": true,
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'admin'",
+      "title": { ".validate": "newData.isString() && newData.val().length < 90" },
+      "robotName": { ".validate": "newData.isString() && newData.val().length < 40" },
+      "$other": { ".validate": false }
     },
 
     "robot": {
@@ -22,6 +35,32 @@
     "map": {
       ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
       ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
+    },
+
+    "spots": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && (root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'admin' || root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot')",
+      "$name": {
+        ".validate": "$name.matches(/^(home|cabin_[A-Z])$/) && newData.hasChildren(['x', 'y', 'yaw'])",
+        "x": { ".validate": "newData.isNumber() && newData.val() > -500 && newData.val() < 500" },
+        "y": { ".validate": "newData.isNumber() && newData.val() > -500 && newData.val() < 500" },
+        "yaw": { ".validate": "newData.isNumber() && newData.val() >= -7 && newData.val() <= 7" },
+        "by": { ".validate": "newData.isString() && newData.val().length < 60" },
+        "label": { ".validate": "newData.isString() && newData.val().length < 60" },
+        "t": { ".validate": "newData.isNumber()" },
+        "$other": { ".validate": false }
+      }
+    },
+
+    "spotStatus": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
+    },
+
+    "spotsMap": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'",
+      ".validate": "newData.isString() && newData.val().length < 100"
     },
 
     "control": {

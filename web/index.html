@@ -76,11 +76,28 @@
   .tick input { width: auto; margin-top: 3px; }
   .chip.urgent { background: var(--bad); color: #ffffff; margin-left: 6px; }
   button.cancel { background: none; color: var(--bad); border: 1px solid var(--bad); padding: 8px; font-size: .9rem; }
+  /* Admin: cabin spots */
+  .spot { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line);
+          padding: 10px 0; }
+  .spot:first-child { border-top: 0; }
+  .spot .btns { display: flex; gap: 6px; flex: none; }
+  .spot .btns button { width: auto; margin: 0; padding: 8px 12px; font-size: .9rem; }
+  #placeCanvas { display: block; margin: 10px auto 0; border-radius: 10px; border: 2px solid var(--accent);
+                 touch-action: manipulation; cursor: crosshair; }
+  .steps { display: flex; gap: 6px; margin: 8px 0 0; }
+  .steps span { flex: 1; text-align: center; font-size: .75rem; padding: 4px 0; border-radius: 6px; background: var(--bg);
+                color: var(--muted); }
+  .steps span.now { background: var(--accent); color: var(--accent-text); font-weight: 700; }
+  .steps span.done { background: var(--ok-bg); color: var(--ok); }
+  .good { color: var(--ok); font-weight: 600; }
+  .badtext { color: var(--bad); font-weight: 600; }
+  .row2 { display: flex; gap: 8px; }
+  .row2 button { flex: 1; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Campus Delivery Robot</h1>
+  <h1 id="pageTitle">Campus Delivery Robot</h1>
 
   <!-- Login: shown until someone is signed in -->
   <form id="login" class="card hidden" autocomplete="on">
@@ -108,12 +125,13 @@
     </div>
 
 
-    <div class="card">
+    <div class="card" id="sendCard">
       <div class="row">
         <div><strong id="whoName"></strong><div id="whoCabin" class="muted"></div></div>
         <button id="logout" class="link" type="button">Log out</button>
       </div>
       <button id="soundState" class="link" type="button">🔔 Sound on (tap to test)</button>
+      <button id="changePw" class="link" type="button">Change my password</button>
       <h2 style="margin-top:16px">Send a parcel</h2>
       <label for="to">Send to</label>
       <select id="to"></select>
@@ -129,8 +147,57 @@
       <div id="msg" class="muted"></div>
     </div>
 
+    <!-- Admin only: the robot's spots (home and the cabins) on the current map -->
+    <div class="card hidden" id="adminCard">
+      <div class="row">
+        <div><strong>Admin</strong><div class="muted">Manage the robot's stops</div></div>
+        <button id="adminLogout" class="link" type="button">Log out</button>
+      </div>
+      <h2 style="margin-top:14px">Project title and robot name</h2>
+      <label for="setTitle">Project title (shown at the top of the page)</label>
+      <input id="setTitle" maxlength="88" placeholder="e.g. Self-Healing Autonomous Campus Courier">
+      <label for="setRobot">Robot name (shown in the robot card)</label>
+      <input id="setRobot" maxlength="38" placeholder="e.g. ParcelPal">
+      <button id="saveSettings" class="quiet" type="button">Save names</button>
+      <div id="settingsMsg" class="muted"></div>
+
+      <h2 style="margin-top:18px">Teachers</h2>
+      <div id="teacherList" class="muted">Loading...</div>
+      <button id="addTeacherLink" class="link" type="button">Add a teacher…</button>
+      <div id="addTeacherBox" class="hidden">
+        <p class="muted">This creates their login. Give them their ID and first password in person; after logging in
+          they can change it (Change my password). Their cabin also needs a robot stop: place it under Cabin spots.</p>
+        <label for="tName">Full name</label><input id="tName" maxlength="58" placeholder="e.g. Dr. Ravikumar">
+        <label for="tId">Login ID (small letters and digits, 3-20)</label>
+        <input id="tId" maxlength="20" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. ravikumar">
+        <label for="tCabin">Cabin</label><select id="tCabin"></select>
+        <label for="tPw">First password (at least 6 characters)</label>
+        <input id="tPw" maxlength="40" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <button id="tCreate" type="button">Create teacher</button>
+        <div id="tMsg" class="muted"></div>
+      </div>
+      <button id="adminPw" class="link" type="button">Change the Admin password</button>
+
+      <h2 style="margin-top:18px">Cabin spots</h2>
+      <p class="muted">A spot is where the robot stops for a cabin. Spots belong to the map below (the map the robot
+        uses now). If the place is mapped again, set the spots again.</p>
+      <div id="spotList" class="muted">Loading...</div>
+      <label for="newCabin">Add a cabin</label>
+      <div class="row2"><select id="newCabin"></select><button id="addCabin" type="button" style="margin-top:0">Place it</button></div>
+      <div id="placeBox" class="hidden">
+        <div class="steps"><span id="st1">1 Area</span><span id="st2">2 Exact spot</span><span id="st3">3 Direction</span><span id="st4">4 Save</span></div>
+        <div class="alert" id="placeStep"></div>
+        <canvas id="placeCanvas"></canvas>
+        <div id="placeInfo" class="muted" style="margin-top:6px"></div>
+        <button id="useRobot" class="quiet" type="button">Use the robot's current position and direction</button>
+        <div class="row2"><button id="placeSave" type="button" class="hidden">Save spot</button>
+          <button id="placeRedo" class="quiet" type="button">Start again</button>
+          <button id="placeCancel" class="quiet" type="button">Cancel</button></div>
+      </div>
+    </div>
+
     <div class="card">
-      <h2>My deliveries</h2>
+      <h2 id="listTitle">My deliveries</h2>
       <div id="list" class="muted">Nothing yet.</div>
     </div>
     <!-- Live map: shown when the robot system has sent its map -->
@@ -156,16 +223,14 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script>
-// ---- People who can log in: login ID, name shown on screen, and the robot's map spot (cabin) ----
-// "cabin" must match a name in config/locations.yaml. The same list (id -> cabin) is enforced by the
-// database rules (members.json), so editing this list alone does not give anyone extra rights.
+// ---- People who can log in come from the database (/members: id -> name, cabin), managed by the Admin ----
+// The database rules check every request against the same list, so nobody can pose as someone else.
 const EMAIL_DOMAIN = "@example.com";
-const TEACHERS = [
-  { id: "abhaybs",     name: "Abhay B S",     cabin: "cabin_A" },
-  { id: "darshanraju", name: "Darshan Raju",  cabin: "cabin_B" },
-  { id: "khushal",     name: "Khushal",       cabin: "cabin_C" },
-  { id: "abhisheksj",  name: "Abhishek S J",  cabin: "cabin_D" },
-];
+let TEACHERS = [];
+function teachersFrom(m) {
+  return Object.entries(m || {}).filter(([id, t]) => t && !t.role && t.cabin)
+    .map(([id, t]) => ({ id, name: t.name || id, cabin: t.cabin })).sort((a, b) => a.cabin.localeCompare(b.cabin));
+}
 
 // Firebase web config (identifies the project; it is not a password)
 const firebaseConfig = {
@@ -200,7 +265,8 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
 
 const $ = id => document.getElementById(id);
 let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, lastDetail = {}, unsub = [];
-let mapInfo = null, mapImg = null, pose = null, control = {};
+let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {};
+const ADMIN_ID = "admin";
 
 function cabinLabel(c) { return c.replace("_", " "); }
 function el(tag, cls, text) {
@@ -244,31 +310,391 @@ auth.onAuthStateChanged(user => {
   mapInfo = null; mapImg = null; pose = null; $("mapCard").classList.add("hidden");
   if (!user) { current = null; show(false); return; }
   const id = (user.email || "").replace(EMAIL_DOMAIN, "");
-  current = TEACHERS.find(t => t.id === id) || null;
-  if (!current) {                                  // e.g. the robot's account on the page
-    show(false); $("loginMsg").textContent = "This account cannot use the page."; auth.signOut(); return;
-  }
+  const refuse = () => { show(false); $("loginMsg").textContent = "This account cannot use the page."; auth.signOut(); };
+  db.ref("members").once("value").then(snap => {
+    if (!auth.currentUser || auth.currentUser.uid !== user.uid) return;    // logged out meanwhile
+    const m = snap.val() || {};
+    TEACHERS = teachersFrom(m);
+    current = m[id] && m[id].role === "admin" ? { id, name: m[id].name || "Admin", cabin: null, admin: true }
+            : TEACHERS.find(t => t.id === id) || null;
+    if (!current) { refuse(); return; }          // e.g. the robot's account, or a removed teacher
+    startApp();
+  }).catch(refuse);                                // not a member: the rules do not even let it read the list
+});
+
+function startApp() {
   show(true);
+  listen(db.ref("members"), s => {                // the Admin may add or change teachers while the page is open
+    TEACHERS = teachersFrom(s.val());
+    if (!current.admin) {
+      const me = TEACHERS.find(t => t.id === current.id);
+      if (!me) { auth.signOut(); $("loginMsg").textContent = "Your account was removed by the Admin."; return; }
+      current = me; $("whoName").textContent = me.name;
+      $("whoCabin").textContent = "Cabin " + cabinLabel(me.cabin).replace("cabin ", "");
+    }
+    renderTeachers(); renderSpots(); fillSendTo(); render();
+  });
+  $("sendCard").classList.toggle("hidden", !!current.admin);
+  $("adminCard").classList.toggle("hidden", !current.admin);
+  $("listTitle").textContent = current.admin ? "All deliveries" : "My deliveries";
+  listen(db.ref("spots"), s => { spots = s.val() || {}; renderSpots(); renderTeachers(); fillSendTo(); drawMap(); });
+  listen(db.ref("spotStatus"), s => { spotStatus = s.val() || {}; renderSpots(); });
+  if (current.admin) {
+    listen(db.ref("robot"), s => { robot = s.val(); renderRobot(); render(); });
+    listen(db.ref("requests").limitToLast(50), s => { requests = s.val() || {}; render(); });
+    listen(db.ref("map"), s => { mapInfo = s.val(); loadMapImage(); });
+    listen(db.ref("pose"), s => { pose = s.val(); drawMap(); drawPlace(); });
+    listen(db.ref("control"), s => { control = s.val() || {}; renderRobot(); });
+    return;
+  }
   $("whoName").textContent = current.name;
   $("whoCabin").textContent = "Cabin " + cabinLabel(current.cabin).replace("cabin ", "");
-  const others = TEACHERS.filter(t => t.id !== current.id);
-  $("to").innerHTML = "";
-  others.forEach((t, i) => {
-    const o = el("option", "", t.name + " (" + cabinLabel(t.cabin) + ")"); o.value = i; $("to").appendChild(o);
-  });
-  $("to")._items = others;
+  fillSendTo();
   listen(db.ref("robot"), s => { robot = s.val(); renderRobot(); render(); });   // render: lid state
   listen(db.ref("requests").limitToLast(50), s => { requests = s.val() || {}; render(); });
   listen(db.ref("map"), s => { mapInfo = s.val(); loadMapImage(); });
   listen(db.ref("pose"), s => { pose = s.val(); drawMap(); });
   listen(db.ref("control"), s => { control = s.val() || {}; renderRobot(); });
-});
+}
 
 function listen(ref, cb) {
   const wrapped = s => cb(s);
   ref.on("value", wrapped, err => { $("msg").textContent = "Cannot read data: " + err.message; });
   unsub.push(() => ref.off("value", wrapped));
 }
+
+// ---------- project title and robot name (anyone may read them, only the Admin changes them) ----------
+let settings = {};
+let TITLE = document.title;
+db.ref("settings").on("value", s => {
+  settings = s.val() || {};
+  TITLE = settings.title || "Campus Delivery Robot";
+  $("pageTitle").textContent = TITLE;
+  if (!document.body.classList.contains("flash")) document.title = TITLE;
+  $("robotName").textContent = settings.robotName || "Robot";
+  if (current && current.admin && document.activeElement !== $("setTitle") && document.activeElement !== $("setRobot")) {
+    $("setTitle").value = settings.title || ""; $("setRobot").value = settings.robotName || "";
+  }
+}, () => {});
+$("saveSettings").onclick = () => {
+  db.ref("settings").set({ title: $("setTitle").value.trim(), robotName: $("setRobot").value.trim() })
+    .then(() => { $("settingsMsg").textContent = "Saved. Everyone sees the new names right away."; })
+    .catch(e => { $("settingsMsg").textContent = "Could not save: " + e.message; });
+};
+
+// ---------- passwords ----------
+function changePassword() {
+  const a = prompt("New password (at least 6 characters):");
+  if (a === null) return;
+  if (a.length < 6) { alert("The password needs at least 6 characters."); return; }
+  if (prompt("Type the new password again:") !== a) { alert("The two passwords were not the same. Nothing changed."); return; }
+  auth.currentUser.updatePassword(a).then(() => alert("Password changed. Use the new one next time you log in."))
+    .catch(e => alert(e.code === "auth/requires-recent-login"
+      ? "For safety, please log out, log in again, and then change the password." : "Could not change it: " + e.message));
+}
+$("changePw").onclick = changePassword;
+$("adminPw").onclick = changePassword;
+
+// ---------- teachers (Admin) ----------
+function freeCabins(exceptId) {
+  const used = new Set(TEACHERS.filter(t => t.id !== exceptId).map(t => t.cabin));
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(l => "cabin_" + l).filter(c => !used.has(c));
+}
+function renderTeachers() {
+  if (!current || !current.admin) return;
+  const list = $("teacherList"), have = spotsNow();
+  list.innerHTML = ""; list.className = "";
+  if (!TEACHERS.length) { list.className = "muted"; list.textContent = "No teachers yet."; }
+  TEACHERS.forEach(t => {
+    const row = el("div", "spot"), info = el("div");
+    info.appendChild(el("div", "route", t.name));
+    info.appendChild(el("div", "muted", "ID: " + t.id + " · " + cabinLabel(t.cabin).replace("cabin", "Cabin")));
+    if (Object.keys(have).length && !have[t.cabin]) info.appendChild(el("div", "badtext", "No robot stop for this cabin yet: place it under Cabin spots."));
+    row.appendChild(info);
+    const btns = el("div", "btns");
+    const mv = el("button", "quiet", "Cabin"); mv.onclick = () => changeCabin(t); btns.appendChild(mv);
+    const rm = el("button", "cancel", "Remove"); rm.onclick = () => removeTeacher(t); btns.appendChild(rm);
+    row.appendChild(btns);
+    list.appendChild(row);
+  });
+  const sel = $("tCabin"), keep = sel.value; sel.innerHTML = "";
+  freeCabins().forEach(c => { const o = el("option", "", cabinLabel(c).replace("cabin", "Cabin")); o.value = c; sel.appendChild(o); });
+  if (keep) sel.value = keep;
+}
+function changeCabin(t) {
+  const free = freeCabins(t.id).map(c => c.replace("cabin_", ""));
+  const l = prompt(t.name + " is in " + cabinLabel(t.cabin).replace("cabin", "Cabin") + ".\nNew cabin letter? Free: " + free.join(" "));
+  if (l === null) return;
+  const c = "cabin_" + l.trim().toUpperCase();
+  if (!free.includes(c.replace("cabin_", ""))) { alert("Cabin " + l + " is not free (or not a letter A-Z)."); return; }
+  db.ref("members/" + t.id + "/cabin").set(c).catch(e => alert("Could not change it: " + e.message));
+}
+function removeTeacher(t) {
+  if (!confirm("Remove " + t.name + "?\n\nThey can no longer log in to this page or send parcels, and their cabin " +
+               "disappears from everyone's Send to list. (Their old login stays listed in the Firebase console, but " +
+               "it cannot do anything.)")) return;
+  db.ref("members/" + t.id).remove().catch(e => alert("Could not remove: " + e.message));
+}
+$("addTeacherLink").onclick = () => {
+  const open = $("addTeacherBox").classList.toggle("hidden") === false;
+  $("addTeacherLink").textContent = open ? "Close" : "Add a teacher…";
+};
+$("tCreate").onclick = () => {
+  const name = $("tName").value.trim(), id = $("tId").value.trim().toLowerCase(), cabin = $("tCabin").value, pw = $("tPw").value;
+  const msg = $("tMsg");
+  if (name.length < 2) { msg.textContent = "Please type the teacher's full name."; return; }
+  if (!/^[a-z0-9]{3,20}$/.test(id)) { msg.textContent = "The login ID may only use small letters and digits (3-20), e.g. ravikumar."; return; }
+  if (["admin", "robot"].includes(id) || TEACHERS.some(t => t.id === id)) { msg.textContent = "That ID is already used. Choose another."; return; }
+  if (!cabin) { msg.textContent = "No free cabin letter left."; return; }
+  if (pw.length < 6) { msg.textContent = "The first password needs at least 6 characters."; return; }
+  $("tCreate").disabled = true; msg.textContent = "Creating the login...";
+  // a second, separate Firebase connection creates the login, so the Admin stays logged in here
+  const creator = firebase.apps.find(a => a.name === "creator") || firebase.initializeApp(firebaseConfig, "creator");
+  const addMember = () => db.ref("members/" + id).set({ name, cabin });
+  creator.auth().createUserWithEmailAndPassword(id + EMAIL_DOMAIN, pw)
+    .then(() => creator.auth().signOut())
+    .then(addMember)
+    .catch(e => {
+      if (e.code === "auth/email-already-in-use" &&
+          confirm("A login with the ID " + id + " already exists (maybe a teacher who was removed). Give it access " +
+                  "again, with its OLD password? (The password you typed is not used.)")) return addMember();
+      throw e;
+    })
+    .then(() => {
+      msg.textContent = "Created: " + name + ", ID " + id + ", " + cabinLabel(cabin).replace("cabin", "Cabin") +
+        ". Tell them their ID and first password in person. If the cabin has no robot stop yet, place it below.";
+      $("tName").value = ""; $("tId").value = ""; $("tPw").value = "";
+    })
+    .catch(e => {
+      msg.textContent = e.code === "auth/weak-password" ? "That password is too weak; use at least 6 characters."
+        : e.code === "auth/operation-not-allowed" ? "Creating logins is switched off in Firebase (Authentication, Sign-in method, Email/Password)."
+        : "Could not create the teacher: " + (e.message || e);
+    })
+    .finally(() => { $("tCreate").disabled = false; });
+};
+
+// ---------- spots (where the robot stops) ----------
+function spotsNow() { return spots && Object.keys(spots).length ? spots : (mapInfo && mapInfo.spots) || {}; }
+
+// "Send to": only people whose cabin has a spot on the current map
+function fillSendTo() {
+  if (!current || current.admin) return;
+  const have = spotsNow();
+  const known = Object.keys(have).length > 0;
+  const others = TEACHERS.filter(t => t.id !== current.id && (!known || have[t.cabin]));
+  $("to").innerHTML = "";
+  others.forEach((t, i) => {
+    const o = el("option", "", t.name + " (" + cabinLabel(t.cabin) + ")"); o.value = i; $("to").appendChild(o);
+  });
+  $("to")._items = others;
+  const mineOk = !known || !!have[current.cabin];
+  $("send").disabled = !mineOk || !others.length;
+  $("msg").textContent = !mineOk ? "Your cabin has no robot stop on the current map yet. Please ask the Admin." : "";
+}
+
+function spotTitle(name) {
+  if (name === "home") return "Home (where the robot waits)";
+  const t = TEACHERS.find(p => p.cabin === name);
+  return cabinLabel(name).replace("cabin", "Cabin") + (t ? " · " + t.name : " · no teacher yet");
+}
+
+function renderSpots() {
+  if (!current || !current.admin) return;
+  const list = $("spotList"), have = spotsNow();
+  const names = Object.keys(have).sort((a, b) => a === "home" ? -1 : b === "home" ? 1 : a.localeCompare(b));
+  list.innerHTML = ""; list.className = "";
+  if (!names.length) { list.className = "muted"; list.textContent = "No spots yet. Start with Home, then add the cabins."; }
+  names.forEach(name => {
+    const row = el("div", "spot"), info = el("div");
+    info.appendChild(el("div", "route", spotTitle(name)));
+    const st = spotStatus[name];
+    if (st) info.appendChild(el("div", st.ok ? "good" : "badtext", st.ok ? "✓ " + st.msg : "✗ " + st.msg));
+    row.appendChild(info);
+    const btns = el("div", "btns");
+    const mv = el("button", "quiet", "Move"); mv.onclick = () => startPlacing(name); btns.appendChild(mv);
+    if (name !== "home") {
+      const del = el("button", "cancel", "Delete"); del.onclick = () => deleteSpot(name); btns.appendChild(del);
+    }
+    row.appendChild(btns);
+    list.appendChild(row);
+  });
+  // cabins that can still be added: letters without a spot (the teachers' cabins first)
+  const sel = $("newCabin"); sel.innerHTML = "";
+  if (!have.home) { const o = el("option", "", "Home (where the robot waits)"); o.value = "home"; sel.appendChild(o); }
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(l => "cabin_" + l).filter(c => !have[c]).forEach(c => {
+    const o = el("option", "", spotTitle(c)); o.value = c; sel.appendChild(o);
+  });
+}
+
+function deleteSpot(name) {
+  if (!confirm("Delete the robot stop for " + spotTitle(name) + "?\n\nNobody can send parcels to or from this cabin " +
+               "until it gets a new stop. Waiting requests for it are cancelled.")) return;
+  db.ref("spots/" + name).remove().catch(e => alert("Could not delete: " + e.message));
+}
+$("addCabin").onclick = () => { if ($("newCabin").value) startPlacing($("newCabin").value); };
+$("adminLogout").onclick = () => auth.signOut();
+
+// ---- placing a spot: 1 rough area (the map zooms in), 2 exact spot, 3 direction, 4 save ----
+const MIN_WALL_CM = 25;
+let place = null;            // { name, step, view: {x, y, scale}, x, y, yaw, wallCm }
+let mapPixels = null;        // the map picture's pixels, to measure the distance to walls on the phone
+
+function startPlacing(name) {
+  if (!mapInfo || !mapImg) { alert("The map is not loaded yet. Is the robot system running?"); return; }
+  place = { name, step: 1, view: null };
+  $("placeBox").classList.remove("hidden");
+  placeText();
+  drawPlace();
+  $("placeBox").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function stopPlacing() { place = null; $("placeBox").classList.add("hidden"); }
+$("placeCancel").onclick = stopPlacing;
+$("placeRedo").onclick = () => { if (place) startPlacing(place.name); };
+
+function placeText() {
+  const n = spotTitle(place.name), info = $("placeInfo");
+  [1, 2, 3, 4].forEach(i => $("st" + i).className = i < place.step ? "done" : i === place.step ? "now" : "");
+  $("placeSave").classList.toggle("hidden", place.step !== 4);
+  $("useRobot").classList.toggle("hidden", place.step === 4);
+  const steps = {
+    1: "Placing " + n + ". Step 1: tap ROUGHLY where this stop should be. The map then zooms in there. " +
+       "White = free floor, black = walls and furniture, grey = not mapped.",
+    2: "Step 2: tap the EXACT spot where the robot should stop. Choose open white floor, at least " + MIN_WALL_CM +
+       " cm (about a hand span) from walls and furniture, where the person can reach the box.",
+    3: "Step 3: tap in the DIRECTION the robot should face when it stops here " +
+       "(usually towards the way it will drive off, e.g. the door). An arrow shows it.",
+    4: "Step 4: check the orange dot (the stop) and the arrow (its direction), then tap Save spot. " +
+       "The robot checks it and shows Accepted or the reason it cannot use it."
+  };
+  $("placeStep").textContent = steps[place.step];
+  if (place.step === 1) info.textContent = "Tip: you can also drive or carry the robot to the cabin, face it the right " +
+    "way, and tap \"Use the robot's current position and direction\".";
+}
+
+function mapPix() {          // the map picture's pixels (once), to check walls on the phone
+  if (mapPixels || !mapImg) return mapPixels;
+  const c = document.createElement("canvas"); c.width = mapImg.width; c.height = mapImg.height;
+  const g = c.getContext("2d"); g.drawImage(mapImg, 0, 0);
+  mapPixels = g.getImageData(0, 0, c.width, c.height).data;
+  return mapPixels;
+}
+function pixelAt(px, py) {   // 40 = wall, 225 = unknown, 255 = free (the bridge's map colours)
+  const d = mapPix(), w = mapImg.width;
+  if (px < 0 || py < 0 || px >= w || py >= mapImg.height) return -1;
+  return d[(py * w + px) * 4];
+}
+function worldToPix(x, y) { const r = mapInfo.resolution; return [Math.floor((x - mapInfo.originX) / r), mapImg.height - 1 - Math.floor((y - mapInfo.originY) / r)]; }
+function checkSpot(x, y) {   // what is at this point, and how far is the nearest wall (cm)
+  const [px, py] = worldToPix(x, y), v = pixelAt(px, py), r = mapInfo.resolution;
+  if (v < 0) return { problem: "That is outside the map. Tap inside the white area." };
+  if (v < 100) return { problem: "That is on a wall or a piece of furniture (black). Tap on white floor." };
+  if (v < 250) return { problem: "That area is not mapped (grey). Tap on white floor the robot has seen." };
+  let best = 99;
+  const reach = Math.ceil(1.0 / r);
+  for (let dy = -reach; dy <= reach; dy++) for (let dx = -reach; dx <= reach; dx++) {
+    const q = pixelAt(px + dx, py + dy);
+    if (q >= 0 && q < 100) best = Math.min(best, Math.hypot(dx, dy) * r);
+  }
+  const cm = Math.round(best * 100);
+  if (cm < MIN_WALL_CM) return { problem: "Only " + cm + " cm from the nearest wall or furniture. The robot needs at least " +
+                                          MIN_WALL_CM + " cm to turn there: tap a little further into the white area.", cm };
+  return { cm: cm >= 99 * 100 ? null : cm };
+}
+
+// the placing map: the whole map at first, zoomed in (about 3 m across) from step 2 on
+function placeView() {
+  const cv = $("placeCanvas"), card = $("adminCard");
+  const full = { x: mapInfo.originX + mapInfo.width * mapInfo.resolution / 2,
+                 y: mapInfo.originY + mapInfo.height * mapInfo.resolution / 2,
+                 span: Math.max(mapInfo.width, mapInfo.height) * mapInfo.resolution };
+  const v = place.view || full;
+  const w = Math.min(card.clientWidth - 30, 520), h = w;
+  return { cv, w, h, cx: v.x, cy: v.y, s: w / v.span };   // s = pixels per metre
+}
+function drawPlace() {
+  if (!place || !mapImg) return;
+  const { cv, w, h, cx, cy, s } = placeView(), dpr = window.devicePixelRatio || 1;
+  cv.style.width = w + "px"; cv.style.height = h + "px"; cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.imageSmoothingEnabled = false;
+  g.fillStyle = "#cfcfcf"; g.fillRect(0, 0, w, h);
+  const r = mapInfo.resolution, toPx = (x, y) => [w / 2 + (x - cx) * s, h / 2 - (y - cy) * s];
+  const [ix, iy] = toPx(mapInfo.originX, mapInfo.originY + mapInfo.height * r);
+  g.drawImage(mapImg, ix, iy, mapInfo.width * r * s, mapInfo.height * r * s);
+  // the other stops, small and grey
+  g.font = "600 11px system-ui, sans-serif"; g.textBaseline = "middle";
+  Object.entries(spotsNow()).forEach(([n, p]) => {
+    if (n === place.name) return;
+    const [x, y] = toPx(p.x, p.y); g.fillStyle = "#5d6677"; g.beginPath(); g.arc(x, y, 4, 0, 2 * Math.PI); g.fill();
+    g.fillText(n === "home" ? "Home" : n.replace("cabin_", ""), x + 6, y);
+  });
+  // the robot's body at the new stop: 0.33 m long box (axle 8.5 cm behind the front), arrow = direction
+  if (place.x !== undefined) {
+    const [x, y] = toPx(place.x, place.y), yaw = place.yaw === undefined ? null : place.yaw;
+    if (yaw !== null) {
+      g.save(); g.translate(x, y); g.rotate(-yaw);
+      g.fillStyle = "rgba(232,89,12,0.25)"; g.strokeStyle = "#e8590c"; g.lineWidth = 2;
+      g.fillRect(-0.245 * s, -0.156 * s, 0.33 * s, 0.312 * s); g.strokeRect(-0.245 * s, -0.156 * s, 0.33 * s, 0.312 * s);
+      g.beginPath(); g.moveTo(0, 0); g.lineTo(0.45 * s, 0); g.stroke();
+      g.beginPath(); g.moveTo(0.45 * s, 0); g.lineTo(0.37 * s, -0.06 * s); g.lineTo(0.37 * s, 0.06 * s); g.closePath();
+      g.fillStyle = "#e8590c"; g.fill(); g.restore();
+    }
+    g.fillStyle = "#e8590c"; g.beginPath(); g.arc(x, y, 6, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke();
+    // the 25 cm the robot needs round it
+    g.strokeStyle = "rgba(232,89,12,0.6)"; g.setLineDash([4, 4]); g.beginPath(); g.arc(x, y, MIN_WALL_CM / 100 * s, 0, 2 * Math.PI);
+    g.stroke(); g.setLineDash([]);
+  }
+  // scale bar: 1 m
+  g.fillStyle = "#1d2330"; g.fillRect(10, h - 14, s, 3); g.fillText("1 m", 14 + s, h - 13);
+}
+
+$("placeCanvas").onclick = ev => {
+  if (!place) return;
+  const { cv, w, h, cx, cy, s } = placeView(), rect = cv.getBoundingClientRect();
+  const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+  const x = cx + (px - w / 2) / s, y = cy - (py - h / 2) / s;
+  const info = $("placeInfo");
+  if (place.step === 1) {
+    place.view = { x, y, span: 3.0 }; place.step = 2; delete place.x; delete place.yaw;
+  } else if (place.step === 2) {
+    const c = checkSpot(x, y);
+    if (c.problem) { info.innerHTML = ""; info.appendChild(el("span", "badtext", "✗ " + c.problem)); place.x = x; place.y = y; delete place.yaw; drawPlace(); return; }
+    place.x = x; place.y = y; place.wallCm = c.cm; place.step = 3;
+    info.innerHTML = ""; info.appendChild(el("span", "good", "✓ Good spot" + (c.cm ? ": " + c.cm + " cm from the nearest wall." : ".")));
+  } else if (place.step === 3 || place.step === 4) {
+    if (Math.hypot(x - place.x, y - place.y) < 0.1) { info.textContent = "Tap a bit further away from the dot, in the direction the robot should face."; return; }
+    place.yaw = Math.atan2(y - place.y, x - place.x); place.step = 4;
+    info.textContent = "Facing " + Math.round(place.yaw * 180 / Math.PI) + "° (map direction). Tap again to change it.";
+  }
+  placeText(); drawPlace();
+};
+
+$("useRobot").onclick = () => {
+  const now = Date.now() + offset;
+  const online = robot && robot.heartbeat && now - robot.heartbeat < 20000;
+  if (!pose || !online || now - pose.t > 15000) {
+    alert("The robot's position is not known right now. Start the robot system and check that the blue dot " +
+          "on the map moves with the robot."); return;
+  }
+  const c = checkSpot(pose.x, pose.y);
+  place.x = pose.x; place.y = pose.y; place.yaw = pose.yaw; place.view = { x: pose.x, y: pose.y, span: 3.0 };
+  place.step = 4; placeText(); drawPlace();
+  const info = $("placeInfo"); info.innerHTML = "";
+  info.appendChild(el("span", c.problem ? "badtext" : "good", c.problem ? "✗ " + c.problem : "✓ Robot position" + (c.cm ? ", " + c.cm + " cm from the nearest wall." : ".")));
+};
+
+$("placeSave").onclick = () => {
+  if (!place || place.yaw === undefined) return;
+  const c = checkSpot(place.x, place.y);
+  if (c.problem && !confirm(c.problem + "\n\nSave anyway? The robot will check it too.")) return;
+  const name = place.name;
+  db.ref("spots/" + name).set({ x: Math.round(place.x * 1000) / 1000, y: Math.round(place.y * 1000) / 1000,
+                                yaw: Math.round(place.yaw * 1000) / 1000, by: "Admin",
+                                t: firebase.database.ServerValue.TIMESTAMP })
+    .then(() => { spotStatus[name] = { ok: true, msg: "Sent. The robot is checking the spot..." }; renderSpots(); stopPlacing(); })
+    .catch(e => alert("Could not save: " + e.message));
+};
+window.addEventListener("resize", drawPlace);
 
 // ---------- actions ----------
 // urgent: hidden behind a link, needs a reason and a tick, so it is not pressed by mistake
@@ -338,7 +764,7 @@ let audio = null, wakeLock = null;
 function soundOn() { return audio && audio.state === "running"; }
 
 function checkSound() {        // show the card while someone is logged in and the sound is locked
-  const need = !!current && !soundOn();
+  const need = !!current && !current.admin && !soundOn();
   $("soundGate").classList.toggle("hidden", !need);
   $("soundState").textContent = soundOn() ? "🔔 Sound on (tap to test)" : "🔕 Sound off (tap to turn on)";
 }
@@ -399,7 +825,6 @@ function needsMe(r) {
 setInterval(() => { if (current && Object.values(requests).some(needsMe)) beep("arrive"); }, 15000);
 
 // flash the page (and the tab title) while the robot waits for this person
-const TITLE = document.title;
 let titleTimer = null;
 function updateFlash() {
   const on = !!current && Object.values(requests).some(needsMe);
@@ -442,7 +867,7 @@ function lidSteps(card, id, opened, lidField, doneField, task, doneLabel) {
 
 // ---------- live map ----------
 function loadMapImage() {
-  mapImg = null;
+  mapImg = null; mapPixels = null;
   if (!mapInfo || !mapInfo.png) { drawMap(); return; }
   const img = new Image();
   img.onload = () => { mapImg = img; drawMap(); };
@@ -476,7 +901,7 @@ function drawMap() {
   // spots: the current job's pickup (orange) and destination (green) stand out
   const job = robot && robot.ref ? requests[robot.ref] : null;
   ctx.font = "600 11px system-ui, sans-serif"; ctx.textBaseline = "middle";
-  Object.entries(mapInfo.spots || {}).forEach(([name, p]) => {
+  Object.entries(spotsNow()).forEach(([name, p]) => {
     const [x, y] = toPx(p.x, p.y);
     const c = job && name === job.sender ? "#e8590c" : job && name === job.destination ? col("--ok") : "#5d6677";
     ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, 5, 0, 2 * Math.PI); ctx.fill();
@@ -512,7 +937,7 @@ function render() {
   const mine = current.cabin, list = $("list");
   const ids = Object.keys(requests).filter(id => {
     const r = requests[id];
-    return r && (r.sender === mine || r.destination === mine);
+    return r && (current.admin || r.sender === mine || r.destination === mine);
   }).sort().reverse().slice(0, 8);
   list.innerHTML = "";
   if (!ids.length) { list.className = "muted"; list.textContent = "Nothing yet."; return; }

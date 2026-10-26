@@ -9,6 +9,9 @@ Database layout (see web/index.html for the writer side):
                    lidSender, lidReceiver, returned, lidReturn, urgent, reason, cancel}
   /robot          {state, detail, queue, ref, lid, lidButtons, estop, heartbeat}      written by this bridge
   /control        {estop, by, t}   emergency stop, written by any member on the website
+  /spots          {home|cabin_X: {x, y, yaw, by, t}}   spots on the current map; written by the Admin on the website
+                  (seeded from locations_file when the map changes; /spotsMap = the map they belong to)
+  /spotStatus     {name: {ok, msg, t}}   the robot's check of each spot (free floor, distance to walls, reachable)
   /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
   /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
                   when -p map_yaml:=<map .yaml> is given (the website draws the map, the spots and the robot)
@@ -26,6 +29,8 @@ Flow:
   the sender sets cancel = true                      -> /delivery_cancel <id> (not yet forwarded: cancelled here)
   /control/estop true/false                          -> /delivery_estop "stop"/"resume" (repeated until the manager's
                                                         status shows the same; also after a restart of either)
+  the Admin changes /spots                           -> each spot is checked on the map; accepted ones are written to
+                                                        locations_file and /delivery_reload_spots tells the manager
 
 Login: the bridge signs in as robot@example.com; its password is read from ~/.delivery_robot_password
 (a private file outside the repo). Fallback to the old open database: --ros-args -p use_auth:=false
@@ -38,6 +43,7 @@ Live map on the website (same map and spots as Nav2 and the delivery manager):
 """
 import base64
 import io
+import shutil
 import json
 import math
 import os
@@ -49,9 +55,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import numpy as np
 import rclpy
 import yaml
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_msgs.msg import Empty, String
 from tf2_ros import Buffer, TransformListener
@@ -84,6 +92,8 @@ class FirebaseBridge(Node):
         self.declare_parameter('map_yaml', '')              # map to show on the website ('' = none)
         self.declare_parameter('locations_file', os.path.join(here, '..', 'config', 'locations.yaml'))
         self.declare_parameter('pose_period', 1.0)          # seconds between position checks
+        self.declare_parameter('spot_clearance', 0.25)      # m a spot must keep from walls/furniture on the map
+        self.declare_parameter('robot_radius', 0.17)        # m: free corridor needed to reach a spot from home
         self.db = self.get_parameter('database_url').value.rstrip('/')
         self.poll_period = self.get_parameter('poll_period').value
         self.heartbeat_period = self.get_parameter('heartbeat_period').value
@@ -102,9 +112,17 @@ class FirebaseBridge(Node):
         self.open_lid_pub = self.create_publisher(Empty, '/delivery_open_lid', 10)
         self.cancel_pub = self.create_publisher(String, '/delivery_cancel', 10)
         self.estop_pub = self.create_publisher(String, '/delivery_estop', 10)
+        self.reload_pub = self.create_publisher(Empty, '/delivery_reload_spots', 10)
+        self.grid = None                 # map for checking spots: (free bool array, wall distance m, res, ox, oy, h)
+        self.spots_applied = None        # the /spots content last applied (to notice changes)
+        self.spots_seeded = False
         self.control = {}                # last /control read from the website (emergency stop)
         self.last_estop_send = 0.0
-        self.create_subscription(String, '/delivery_status', self._on_status, 10)
+        # transient local like the manager's publisher: a bridge started after the manager still gets its last
+        # status (with the default QoS the website showed "UNKNOWN" until the next status, 2026-10-26)
+        self.create_subscription(String, '/delivery_status', self._on_status,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                            reliability=ReliabilityPolicy.RELIABLE))
 
         self.lock = threading.Lock()
         self.last_status = None          # last manager status (dict)
@@ -227,6 +245,7 @@ class FirebaseBridge(Node):
             try:
                 reqs = self._http('GET', 'requests') or {}
                 control = self._http('GET', 'control') or {}
+                self._check_spots()
                 if self.net_ok is False:
                     self.get_logger().info('Connection to Firebase restored')
                 self.net_ok = True
@@ -298,6 +317,146 @@ class FirebaseBridge(Node):
         self.get_logger().warn('Emergency stop %s (pressed by %s)' % ('ON' if want else 'released',
                                                                     str(control.get('by', '?'))[:60]))
 
+    # ---------- spots set by the Admin ----------
+    def _load_grid(self, img, res, ox, oy):
+        """Free cells and each cell's distance to the nearest wall (m), for checking spots."""
+        free = img > 250
+        wall = img < 100
+        dist = np.full(img.shape, np.inf)
+        dist[wall] = 0.0
+        # two-pass chamfer distance (approximate Euclidean), plenty for a 25 cm check
+        h, w = img.shape
+        for r in range(h):
+            for c in range(w):
+                if dist[r, c]:
+                    best = dist[r, c]
+                    if r > 0:
+                        best = min(best, dist[r - 1, c] + 1, dist[r - 1, c - 1] + 1.414 if c > 0 else np.inf,
+                                   dist[r - 1, c + 1] + 1.414 if c < w - 1 else np.inf)
+                    if c > 0:
+                        best = min(best, dist[r, c - 1] + 1)
+                    dist[r, c] = best
+        for r in range(h - 1, -1, -1):
+            for c in range(w - 1, -1, -1):
+                if dist[r, c]:
+                    best = dist[r, c]
+                    if r < h - 1:
+                        best = min(best, dist[r + 1, c] + 1, dist[r + 1, c + 1] + 1.414 if c < w - 1 else np.inf,
+                                   dist[r + 1, c - 1] + 1.414 if c > 0 else np.inf)
+                    if c < w - 1:
+                        best = min(best, dist[r, c + 1] + 1)
+                    dist[r, c] = best
+        self.grid = (free, dist * res, res, ox, oy, h)
+
+    def _cell(self, x, y):
+        free, dist, res, ox, oy, h = self.grid
+        return int(h - 1 - (y - oy) / res), int((x - ox) / res)
+
+    def _spot_problem(self, name, p, home):
+        """None if the spot is fine for the robot, else a short reason (shown to the Admin)."""
+        if self.grid is None:
+            return None                                   # no map loaded: cannot check
+        free, dist, res, ox, oy, h = self.grid
+        r, c = self._cell(p['x'], p['y'])
+        if not (0 <= r < free.shape[0] and 0 <= c < free.shape[1]):
+            return 'outside the map'
+        if not free[r, c]:
+            return 'not on free floor (on a wall, furniture or an unmapped area)'
+        need = self.get_parameter('spot_clearance').value
+        if dist[r, c] < need:
+            return 'too close to a wall or furniture (%.0f cm, needs %.0f cm)' % (dist[r, c] * 100, need * 100)
+        if home is not None and name != 'home':
+            if not self._reachable(home, p):
+                return 'cannot be reached from home (no corridor wide enough for the robot)'
+        return None
+
+    def _reachable(self, a, b):
+        """True if a corridor at least robot_radius wide connects spot a to spot b on the map."""
+        free, dist, res, ox, oy, h = self.grid
+        ok = free & (dist >= self.get_parameter('robot_radius').value)
+        start, goal = self._cell(a['x'], a['y']), self._cell(b['x'], b['y'])
+        if not (ok[start] and ok[goal]):
+            return False
+        seen = np.zeros_like(ok)
+        seen[start] = True
+        todo = [start]
+        while todo:
+            r, c = todo.pop()
+            if (r, c) == goal:
+                return True
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < ok.shape[0] and 0 <= cc < ok.shape[1] and ok[rr, cc] and not seen[rr, cc]:
+                    seen[rr, cc] = True
+                    todo.append((rr, cc))
+        return False
+
+    def _read_locations(self):
+        path = os.path.normpath(os.path.expanduser(self.get_parameter('locations_file').value))
+        with open(path) as f:
+            return path, yaml.safe_load(f) or {}
+
+    def _check_spots(self):
+        """Seed /spots from the spot file once per map; afterwards apply the Admin's changes (checked) to the file."""
+        map_name = os.path.basename(self.get_parameter('map_yaml').value) or 'no map'
+        if not self.spots_seeded:
+            current = self._http('GET', 'spotsMap')
+            path, data = self._read_locations()
+            locs = data.get('locations') or {}
+            if current != map_name or not self._http('GET', 'spots'):
+                spots = {n: {'x': round(float(p['x']), 3), 'y': round(float(p['y']), 3),
+                             'yaw': round(float(p.get('yaw', 0.0)), 3), 'by': 'robot', 't': {'.sv': 'timestamp'}}
+                         for n, p in locs.items() if re.match(r'^(home|cabin_[A-Z])$', n)}
+                self._http('PUT', 'spots', spots)
+                self._http('PUT', 'spotsMap', map_name)
+                self._http('PUT', 'spotStatus', {n: {'ok': True, 'msg': 'from the spot file', 't': {'.sv': 'timestamp'}}
+                                                 for n in spots})
+                self.get_logger().info('Spots of %s copied to the website (%d)' % (map_name, len(spots)))
+            self.spots_seeded = True
+        spots = self._http('GET', 'spots') or {}
+        if not isinstance(spots, dict) or spots == self.spots_applied:
+            return
+        path, data = self._read_locations()
+        locs = dict(data.get('locations') or {})
+        status, changed = {}, False
+        home = spots.get('home') or locs.get('home')
+        for name, p in spots.items():
+            if not (re.match(r'^(home|cabin_[A-Z])$', name) and isinstance(p, dict)
+                    and all(isinstance(p.get(k), (int, float)) for k in ('x', 'y', 'yaw'))):
+                continue
+            new = {'x': round(float(p['x']), 3), 'y': round(float(p['y']), 3), 'yaw': round(float(p['yaw']), 3)}
+            old = locs.get(name)
+            if old and all(abs(float(old.get(k, 0)) - new[k]) < 0.002 for k in new):
+                continue                                   # unchanged
+            why = self._spot_problem(name, new, None if name == 'home' else home)
+            if why:
+                status[name] = {'ok': False, 'msg': 'Rejected: ' + why, 't': {'.sv': 'timestamp'}}
+                self.get_logger().warn('Spot %s rejected: %s' % (name, why))
+                continue
+            locs[name] = new
+            changed = True
+            status[name] = {'ok': True, 'msg': 'Accepted', 't': {'.sv': 'timestamp'}}
+            self.get_logger().info('Spot %s set by %s: x=%.2f y=%.2f yaw=%.0f deg'
+                                   % (name, p.get('by', '?'), new['x'], new['y'], math.degrees(new['yaw'])))
+        for name in [n for n in locs if n != 'home' and n not in spots]:
+            del locs[name]                                 # deleted by the Admin
+            changed = True
+            status[name] = None
+            self.get_logger().info('Spot %s deleted' % name)
+        if changed:
+            if not os.path.exists(path + '.bak'):
+                shutil.copy(path, path + '.bak')           # the file as it was before the first change
+            data['locations'] = locs
+            tmp = path + '.tmp'
+            with open(tmp, 'w') as f:
+                yaml.safe_dump(data, f, sort_keys=False)
+            os.replace(tmp, path)
+            self.reload_pub.publish(Empty())
+            self.out.put(('PATCH', 'map', {'spots': {n: {'x': p['x'], 'y': p['y']} for n, p in locs.items()}}, None))
+        if status:
+            self._http('PATCH', 'spotStatus', status)
+        self.spots_applied = spots
+
     def _press(self, needed_state, rid, publisher, sent_set):
         """Forward a button press only while the manager waits for exactly this request."""
         with self.lock:
@@ -351,6 +510,7 @@ class FirebaseBridge(Node):
             img = Image.open(img_path).convert('L')
             w, h = img.size
             px = img.load()
+            self._load_grid(np.array(img), res, ox, oy)
             # map_server colours: 0 = wall, 254 = free floor, 205 = unknown. Keep the explored part plus a margin.
             known = [(x, y) for y in range(h) for x in range(w) if px[x, y] != 205]
             if not known:

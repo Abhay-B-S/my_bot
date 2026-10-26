@@ -17,5 +17,9 @@
   },
   "robot": {
     "role": "robot"
+  },
+  "admin": {
+    "name": "Admin",
+    "role": "admin"
   }
 }

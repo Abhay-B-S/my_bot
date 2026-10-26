@@ -19,6 +19,7 @@ Topics (all plain ROS 2, so a website bridge can use them later):
                                              optional 4th field "urgent")
   in : /delivery_cancel    std_msgs/String  website id of the job to cancel
   in : /delivery_estop     std_msgs/String  "stop" or "resume"
+  in : /delivery_reload_spots std_msgs/Empty  read locations_file again (the Admin moved/added/deleted a spot)
   in : /delivery_shipped   std_msgs/Empty   sender has loaded the parcel
   in : /delivery_received  std_msgs/Empty   receiver has taken the parcel
   in : /delivery_open_lid  std_msgs/Empty   the person at the robot wants the lid open (lid_buttons mode)
@@ -111,7 +112,8 @@ class DeliveryManager(Node):
         self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
                                                               # is really this close to the spot (0 = do not check)
 
-        path = os.path.normpath(self.get_parameter('locations_file').value)
+        self.locations_path = os.path.normpath(self.get_parameter('locations_file').value)
+        path = self.locations_path
         with open(path) as f:
             data = yaml.safe_load(f)
         self.frame = data.get('frame_id', 'map')
@@ -132,6 +134,7 @@ class DeliveryManager(Node):
         self.create_subscription(Empty, '/delivery_returned', self._on_returned, 10)
         self.create_subscription(String, '/delivery_cancel', self._on_cancel, 10)
         self.create_subscription(String, '/delivery_estop', self._on_estop, 10)
+        self.create_subscription(Empty, '/delivery_reload_spots', self._on_reload_spots, 10)
         self.stop_pub = self.create_publisher(Twist, '/cmd_vel_key', 10)   # emergency stop: above everything
         self.estop = False
         self.estop_target = None         # the leg to continue after "resume"
@@ -336,6 +339,38 @@ class DeliveryManager(Node):
                 self._go(target)
             else:
                 self._publish('Emergency stop released.')
+
+    def _on_reload_spots(self, _msg):
+        """The Admin changed the spots on the website: use the new positions from now on (the next goal sent uses
+        them); jobs for a deleted cabin are dropped, the current one is cancelled like by its sender."""
+        try:
+            with open(self.locations_path) as f:
+                locs = (yaml.safe_load(f) or {}).get('locations') or {}
+        except (OSError, yaml.YAMLError) as exc:
+            self.get_logger().error('Could not read the spots again: %s' % exc)
+            return
+        if self.home not in locs:
+            self.get_logger().error('New spot file has no %s: keeping the old spots' % self.home)
+            return
+        gone = set(self.locations) - set(locs)
+        old, self.locations = self.locations, locs
+        self.get_logger().info('Spots reloaded: %s%s' % (', '.join(locs), ' (deleted: %s)' % ', '.join(sorted(gone))
+                                                          if gone else ''))
+        for job in list(self.queue):
+            if job['sender'] in gone or job['destination'] in gone:
+                self.queue.remove(job)
+                self._publish('Job %d dropped: its cabin was removed by the Admin.' % job['id'], cancelled_ref=job['ref'])
+        if self.job and (self.job['sender'] in gone or self.job['destination'] in gone) and self.job.get('ref'):
+            if self.job['sender'] in gone and self.state in (TO_DROPOFF, WAIT_RECEIVED, RETURN_TO_SENDER, WAIT_RETURNED):
+                for name in (self.job['sender'], self.job['destination']):
+                    if name in gone:                   # keep the old position until this parcel is handed over
+                        self.locations[name] = old[name]
+                self.get_logger().warn('The sender\'s cabin of the current job was removed while the parcel is on '
+                                       'board: finishing the job with the old spots')
+            else:
+                self._on_cancel(String(data=self.job['ref']))
+        if self.last_spot not in self.locations:
+            self.last_spot = self.home
 
     def _hold_estop(self):
         if self.estop:                   # zero speed above Nav2, the guard, gap assist and self-recovery
