@@ -51,6 +51,16 @@ Blocked routes (needs scripts/path_guard.py running):  -p path_guard:=true
   0 by default, the user found re-checking too slow on 2026-10-24.)
   The same giving-up rules apply when Nav2 fails a leg `max_nav_retries` times for any other reason.
 
+Battery (needs scripts/battery_monitor.py running):  -p battery_aware:=true
+  Before starting a job the robot estimates the energy it needs for the worst case: from where it is to the sender,
+  to the receiver, back to the sender (route blocked, parcel returned) and home: straight-line metres x `wh_per_m`
+  (learned from its own trips, kept in energy_file) + `wait_wh` for the waiting. If the battery would end below
+  `reserve_pct`, the job stays in the queue, the robot goes home and asks to be charged; it starts by itself once the
+  battery is high enough again. If the battery turns "critical" on the way to a sender (no parcel on board yet),
+  that job goes back to the front of the queue and the robot goes home. With a parcel on board it always finishes.
+  Motor power switched off (battery "off"): no job starts. A simulated battery (no sensor fitted) is ignored unless
+  -p battery_trust_sim:=true (Gazebo tests only).
+
 Run (sim, Nav2 already running):
   python3 src/my_bot/scripts/delivery_manager.py --ros-args -p use_sim_time:=true
 Test without Nav2:
@@ -109,6 +119,14 @@ class DeliveryManager(Node):
         self.declare_parameter('return_to_sender', True)      # undeliverable parcel goes back to the sender
         self.declare_parameter('max_detours', 2)              # route switches on one leg before "every route blocked"
         self.declare_parameter('max_wait', 300.0)             # s: a normal job waiting this long goes before nearer ones
+        self.declare_parameter('battery_aware', False)        # True = check the battery before each job
+        self.declare_parameter('battery_wh', 27.0)            # usable energy of a full pack: 3 x 3.6 V x 2.5 Ah
+        self.declare_parameter('wh_per_m', 0.15)              # first guess, then learned (Wh per straight-line metre)
+        self.declare_parameter('wait_wh', 0.5)                # energy for the waiting at the two cabins
+        self.declare_parameter('reserve_pct', 12.0)           # battery % that must be left after the worst case
+        self.declare_parameter('energy_file', '~/dev_ws/run_logs/energy_model.json')
+        self.declare_parameter('battery_trust_sim', False)    # act on a SIMULATED battery too (tests in Gazebo only;
+                                                              # never on the real robot: its numbers are made up)
         self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
                                                               # is really this close to the spot (0 = do not check)
 
@@ -179,6 +197,24 @@ class DeliveryManager(Node):
             self.clear_costmap = self.create_client(ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
             self.get_logger().info('Path guard ENABLED (needs path_guard.py running)')
 
+        self.battery_aware = self.get_parameter('battery_aware').value
+        self.battery = None              # last /battery_status (dict) and when it came
+        self.battery_t = 0.0
+        self.battery_hold = False        # a job waits for charging: do not skip the trip home
+        self.battery_msg = ''            # last "please charge" message (published again only when it changes)
+        self.leg_energy = None           # (Wh counter, x, y) at the start of the current leg, for learning wh_per_m
+        self.energy_path = os.path.expanduser(self.get_parameter('energy_file').value)
+        self.wh_per_m = self.get_parameter('wh_per_m').value
+        try:
+            with open(self.energy_path) as f:
+                self.wh_per_m = float(json.load(f)['wh_per_m'])
+        except (OSError, ValueError, KeyError):
+            pass
+        if self.battery_aware:
+            self.create_subscription(String, '/battery_status', self._on_battery, status_qos)
+            self.get_logger().info('Battery check ENABLED (needs battery_monitor.py), %.3f Wh per metre'
+                                   % self.wh_per_m)
+
         self.state = IDLE
         self.lid_opened = False       # someone opened the lid at the current stop (lid_buttons mode)
         self.last_spot = self.home    # the last spot reached (for "nearest" when the live position is unknown)
@@ -202,7 +238,7 @@ class DeliveryManager(Node):
         self._publish('Ready at %s. Waiting for requests.' % self.home)
 
     # ---------- status ----------
-    def _publish(self, detail, result=None, rejected_ref=None, cancelled_ref=None):
+    def _publish(self, detail, result=None, rejected_ref=None, cancelled_ref=None, requeued_ref=None):
         # ref = the website's id for the CURRENT job; result = 'delivered' or 'failed' when a job ends;
         # rejected_ref = the id of a request that was refused (so the website can show why)
         msg = {'state': self.state,
@@ -211,12 +247,15 @@ class DeliveryManager(Node):
                'sender': self.job['sender'] if self.job else None,
                'destination': self.job['destination'] if self.job else None,
                'detail': detail, 'queue': len(self.queue),
+               'queue_jobs': [{'ref': j.get('ref'), 'sender': j['sender'], 'destination': j['destination'],
+                               'urgent': bool(j.get('urgent'))} for j in self.queue],   # for eta_estimator
                'result': result, 'rejected_ref': rejected_ref, 'cancelled_ref': cancelled_ref,
+               'requeued_ref': requeued_ref,
                'urgent': bool(self.job and self.job.get('urgent')), 'estop': self.estop,
                'cargo': self.cargo_state if self.cargo_enabled else None, 'lid_buttons': self.lid_buttons}
         self.status_pub.publish(String(data=json.dumps(msg)))
         self.last_publish = time.monotonic()
-        if result is None and rejected_ref is None and cancelled_ref is None:
+        if result is None and rejected_ref is None and cancelled_ref is None and requeued_ref is None:
             self.last_detail = detail
         self.get_logger().info('[%s] %s' % (self.state, detail))
 
@@ -563,6 +602,10 @@ class DeliveryManager(Node):
     # ---------- driving ----------
     def _go(self, name):
         self.want_goal = name
+        self.leg_energy = None
+        here = self._here()
+        if self.battery and self.battery.get('wh') is not None and here is not None:
+            self.leg_energy = (self.battery['wh'], here[0], here[1])
         self.retries = 0
         self.rechecks = 0
         self.detours, self.detour_spots = 0, []
@@ -684,6 +727,7 @@ class DeliveryManager(Node):
 
     def _arrived(self):
         self.last_spot = self._current_target()
+        self._learn_energy(self.last_spot)
         self.lid_opened = False
         if self.state == TO_PICKUP:
             self.state = WAIT_SHIPPED
@@ -710,7 +754,7 @@ class DeliveryManager(Node):
         elif self.state == RETURNING:
             self.state = IDLE
             self.job = None
-            self._publish('Back at %s. Ready.' % self.home)
+            self._publish('Back at %s%s' % (self.home, ' to charge.' if self.battery_hold else '. Ready.'))
 
     # ---------- main loop (twice a second) ----------
     def _tick(self):
@@ -719,7 +763,7 @@ class DeliveryManager(Node):
         # a job is waiting while the robot heads home: skip the trip home and start the job from here.
         # (at least 1 s after the last status, so the website surely got the previous job's result)
         if (self.state == RETURNING and self.queue and now - self.last_publish >= 1.0 and not self.estop
-                and not self.get_parameter('go_home_between_jobs').value):
+                and not self.battery_hold and not self.get_parameter('go_home_between_jobs').value):
             self._abandon_goal()
             self.state = IDLE
             self.job = None
@@ -760,13 +804,105 @@ class DeliveryManager(Node):
         # start the next job (see _next_job), not in the same instant as the previous status
         if self.state == IDLE and self.queue and not self.lost and not self.motor_fault and not self.estop \
                 and now - self.last_publish >= 1.0:
-            self.job, why = self._next_job(now)
+            job, why = self._next_job(now)
+            if not self._battery_ok(job):
+                return
+            self.battery_hold, self.battery_msg = False, ''
+            self.job = job
             self.queue.remove(self.job)
             self.state = TO_PICKUP
             self._publish('Starting %sjob %d: %s -> %s%s'
                           % ('URGENT ' if self.job['urgent'] else '', self.job['id'], self.job['sender'],
                              self.job['destination'], why))
             self._go(self.job['sender'])
+
+    # ---------- battery ----------
+    def _on_battery(self, msg):
+        try:
+            b = json.loads(msg.data)
+        except ValueError:
+            return
+        if b.get('source') == 'sim' and not self.get_parameter('battery_trust_sim').value:
+            return
+        self.battery, self.battery_t = b, time.monotonic()
+        if self.battery.get('state') == 'critical' and self.state == TO_PICKUP and self.job is not None:
+            # no parcel on board yet: put the job back and go home to charge
+            job, self.job = self.job, None
+            self.queue.appendleft(job)
+            self._abandon_goal()
+            self.battery_hold = True
+            self.state = RETURNING
+            self._publish('Battery very low (%s %%): job %d goes back to the queue, going home to charge'
+                          % (self.battery.get('pct'), job['id']), requeued_ref=job.get('ref'))
+            self._go(self.home)
+
+    def _here(self):
+        """(x, y) of the robot on the map, or of the last spot reached when the live position is unknown."""
+        if not self.dry_run:
+            try:
+                t = self.tf_buffer.lookup_transform(self.frame, 'base_link', Time()).transform.translation
+                return t.x, t.y
+            except Exception:
+                pass
+        p = self.locations[self.last_spot]
+        return float(p['x']), float(p['y'])
+
+    def _job_pct(self, job):
+        """Battery % the job needs in the worst case: here -> sender -> receiver -> sender -> home."""
+        pts = [self._here()] + [(float(self.locations[n]['x']), float(self.locations[n]['y']))
+                                for n in (job['sender'], job['destination'], job['sender'], self.home)]
+        metres = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+        wh = metres * self.wh_per_m + self.get_parameter('wait_wh').value
+        return 100.0 * wh / self.get_parameter('battery_wh').value, metres
+
+    def _battery_ok(self, job):
+        """True = the job may start. Otherwise the robot goes (or stays) home and says why."""
+        if not self.battery_aware:
+            return True
+        b = self.battery
+        if b is None or time.monotonic() - self.battery_t > 15.0 or b.get('error'):
+            return True                      # no (real) battery reading: never block the deliveries
+        if b.get('state') == 'off':
+            msg = 'Motor power is switched off. Switch it on to start job %d.' % job['id']
+        else:
+            need, metres = self._job_pct(job)
+            left = b['pct'] - need
+            if left >= self.get_parameter('reserve_pct').value:
+                return True
+            msg = ('Battery %d %%: job %d (%s -> %s, about %.0f m with a possible return) needs about %.0f %%, '
+                   'which would leave %.0f %%. Please charge the robot; the job starts by itself afterwards.'
+                   % (b['pct'], job['id'], job['sender'], job['destination'], metres, need, max(left, 0)))
+        self.battery_hold = True
+        if self.state == IDLE and self.last_spot != self.home and not self.want_goal and not self.navigating:
+            self.state = RETURNING
+            self._publish('Not enough battery for the next job: going home to charge.')
+            self._go(self.home)
+            return False
+        if msg != self.battery_msg:
+            self.battery_msg = msg
+            self._publish(msg)
+        return False
+
+    def _learn_energy(self, target):
+        """Update wh_per_m from the leg just finished (energy used / straight-line distance)."""
+        start, self.leg_energy = self.leg_energy, None
+        if start is None or self.dry_run or not self.battery or self.battery.get('wh') is None:
+            return
+        p = self.locations[target]
+        metres = math.hypot(float(p['x']) - start[1], float(p['y']) - start[2])
+        used = self.battery['wh'] - start[0]
+        if metres < 1.0 or used <= 0:
+            return
+        self.wh_per_m = min(1.0, max(0.03, 0.8 * self.wh_per_m + 0.2 * used / metres))
+        try:
+            os.makedirs(os.path.dirname(self.energy_path), exist_ok=True)
+            with open(self.energy_path, 'w') as f:
+                json.dump({'wh_per_m': round(self.wh_per_m, 4), 'source': self.battery.get('source'),
+                           't': round(time.time())}, f)
+        except OSError:
+            pass
+        self.get_logger().info('Leg to %s: %.2f Wh for %.1f m -> %.3f Wh per metre'
+                               % (target, used, metres, self.wh_per_m))
 
     def _next_job(self, now):
         """Urgent jobs first (first come, first served among them); then any job waiting longer than max_wait

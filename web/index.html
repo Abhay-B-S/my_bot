@@ -65,6 +65,10 @@
   /* live map */
   #mapCanvas { display: block; margin: 0 auto; border-radius: 10px; border: 1px solid var(--line); }
   #mapText { margin-top: 8px; }
+  #wifiToggle { width: auto; margin: 10px 0 0; padding: 8px 12px; font-size: .9rem; }
+  #wifiToggle.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  #wifiText { margin-top: 6px; }
+  #wifiText .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 3px 0 8px; }
   /* emergency stop, urgent requests, cancel */
   button.danger { background: var(--bad); color: #ffffff; }
   button.quiet { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
@@ -93,6 +97,14 @@
   .badtext { color: var(--bad); font-weight: 600; }
   .row2 { display: flex; gap: 8px; }
   .row2 button { flex: 1; }
+  .eta { margin-top: 6px; font-weight: 600; color: var(--accent); }
+  /* battery of the robot (motor battery, from battery_monitor) */
+  #battery { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: .9rem; flex-wrap: wrap; }
+  #battery .bar { width: 44px; height: 16px; border: 2px solid var(--muted); border-radius: 4px; padding: 1px; flex: none; }
+  #battery .bar i { display: block; height: 100%; border-radius: 2px; background: var(--ok); }
+  #battery.low .bar i { background: var(--warn); } #battery.critical .bar i { background: var(--bad); }
+  #battery.low strong { color: var(--warn); } #battery.critical strong { color: var(--bad); }
+  #battery .chip { font-size: .72rem; }
 </style>
 </head>
 <body>
@@ -121,6 +133,7 @@
         <div class="stopped" id="stoppedText">EMERGENCY STOP</div>
         <button id="resume" class="quiet" type="button">Resume the robot</button>
       </div>
+      <div id="battery" class="hidden"></div>
       <button id="estop" class="danger" type="button">⛔ Emergency stop</button>
     </div>
 
@@ -205,6 +218,8 @@
       <h2>Where is the robot</h2>
       <canvas id="mapCanvas"></canvas>
       <div id="mapText" class="muted"></div>
+      <button id="wifiToggle" class="quiet" type="button">📶 Show Wi-Fi signal</button>
+      <div id="wifiText" class="muted hidden"></div>
     </div>
   </div>
 
@@ -265,7 +280,7 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
 
 const $ = id => document.getElementById(id);
 let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, lastDetail = {}, unsub = [];
-let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {};
+let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {}, eta = null, battery = null, wifiMap = null;
 const ADMIN_ID = "admin";
 
 function cabinLabel(c) { return c.replace("_", " "); }
@@ -345,6 +360,9 @@ function startApp() {
     listen(db.ref("map"), s => { mapInfo = s.val(); loadMapImage(); });
     listen(db.ref("pose"), s => { pose = s.val(); drawMap(); drawPlace(); });
     listen(db.ref("control"), s => { control = s.val() || {}; renderRobot(); });
+    listen(db.ref("eta"), s => { eta = s.val(); render(); });
+    listen(db.ref("battery"), s => { battery = s.val(); renderBattery(); });
+    listen(db.ref("wifiMap"), s => { wifiMap = s.val(); drawMap(); });
     return;
   }
   $("whoName").textContent = current.name;
@@ -355,6 +373,9 @@ function startApp() {
   listen(db.ref("map"), s => { mapInfo = s.val(); loadMapImage(); });
   listen(db.ref("pose"), s => { pose = s.val(); drawMap(); });
   listen(db.ref("control"), s => { control = s.val() || {}; renderRobot(); });
+  listen(db.ref("eta"), s => { eta = s.val(); render(); });
+  listen(db.ref("battery"), s => { battery = s.val(); renderBattery(); });
+  listen(db.ref("wifiMap"), s => { wifiMap = s.val(); drawMap(); });
 }
 
 function listen(ref, cb) {
@@ -897,6 +918,7 @@ function drawMap() {
   ctx.drawImage(mapImg, 0, 0, w, h);
   const res = mapInfo.resolution;
   const toPx = (x, y) => [(x - mapInfo.originX) / res * s, h - (y - mapInfo.originY) / res * s];
+  drawWifi(ctx, toPx, res, s);
 
   // spots: the current job's pickup (orange) and destination (green) stand out
   const job = robot && robot.ref ? requests[robot.ref] : null;
@@ -923,12 +945,118 @@ function drawMap() {
     ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill();
     ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
   }
+  renderWifiText();
   $("mapText").textContent = !pose ? "Robot position not known yet."
     : fresh ? "Live position" + (job ? " · orange = pickup, green = destination" : "")
     : "Last known position (the robot system is offline or not localised).";
 }
 window.addEventListener("resize", drawMap);
+
+// ---------- Wi-Fi coverage (measured by the robot on its trips: wifi_probe on the Pi, wifi_mapper on the laptop) ----------
+let showWifi = false;
+try { showWifi = localStorage.getItem("showWifi") === "1"; } catch (e) {}
+const WIFI_LEVELS = [[-60, "#2f9e44", "strong"], [-67, "#94c11f", "good"], [-75, "#f59f00", "weak"],
+                     [-999, "#e03131", "very weak"]];
+function wifiLevel(dbm) { return WIFI_LEVELS.find(l => dbm >= l[0]); }
+function wifiCells() {
+  if (!wifiMap || !wifiMap.cells || !mapInfo || (wifiMap.map && mapInfo.name && wifiMap.map !== mapInfo.name.replace(/\.yaml$/, ""))) return [];
+  return Object.entries(wifiMap.cells).map(([k, v]) => {
+    const [i, j] = k.split("_").map(Number);
+    return { i, j, dbm: v[0], worst: v[1], n: v[2], rtt: v[3], lost: v[4] };
+  }).filter(c => c.dbm !== null);
+}
+function drawWifi(ctx, toPx, res, s) {
+  const cells = showWifi ? wifiCells() : [];
+  if (!cells.length) return;
+  const size = wifiMap.cell / res * s;
+  ctx.globalAlpha = 0.55;
+  cells.forEach(c => {
+    const [x, y] = toPx(c.i * wifiMap.cell, (c.j + 1) * wifiMap.cell);
+    ctx.fillStyle = wifiLevel(c.dbm)[1];
+    ctx.fillRect(x, y, size, size);
+  });
+  ctx.globalAlpha = 1;
+  cells.filter(c => c.lost >= 20).forEach(c => {   // many pings lost here: framed in dark red
+    const [x, y] = toPx(c.i * wifiMap.cell, (c.j + 1) * wifiMap.cell);
+    ctx.strokeStyle = "#7d0000"; ctx.lineWidth = 2; ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
+  });
+}
+function renderWifiText() {
+  const box = $("wifiText"), btn = $("wifiToggle");
+  btn.classList.toggle("on", showWifi);
+  btn.textContent = showWifi ? "📶 Hide Wi-Fi signal" : "📶 Show Wi-Fi signal";
+  box.classList.toggle("hidden", !showWifi);
+  if (!showWifi) return;
+  const cells = wifiCells();
+  box.textContent = "";
+  if (!cells.length) { box.textContent = "No Wi-Fi measurements on this map yet: they are collected while the robot drives."; return; }
+  box.appendChild(document.createTextNode("Signal measured by the robot on its trips:"));
+  WIFI_LEVELS.forEach(l => {
+    const sw = el("span", "sw"); sw.style.background = l[1]; box.appendChild(sw);
+    box.appendChild(document.createTextNode(l[2]));
+  });
+  box.appendChild(document.createTextNode(" · dark frame = connection drops."));
+  // the signal where the robot waits: the measured square nearest to each spot (within 1 m)
+  const parts = [];
+  Object.entries(spotsNow()).forEach(([name, p]) => {
+    let best = null, bd = 1.0;
+    cells.forEach(c => {
+      const d = Math.hypot((c.i + 0.5) * wifiMap.cell - p.x, (c.j + 0.5) * wifiMap.cell - p.y);
+      if (d <= bd) { bd = d; best = c; }
+    });
+    if (best) parts.push(spotLabel(name) + ": " + wifiLevel(best.dbm)[2] + " (" + Math.round(best.dbm) + " dBm" +
+                         (best.rtt !== null ? ", " + best.rtt + " ms" : "") + ")");
+  });
+  if (parts.length) box.appendChild(el("div", "", "At the spots: " + parts.join(" · ")));
+  const lags = cells.filter(c => c.rtt !== null);
+  if (lags.length) {
+    const avg = Math.round(lags.reduce((a, c) => a + c.rtt, 0) / lags.length), worst = Math.max(...lags.map(c => c.rtt));
+    box.appendChild(el("div", "", "Robot ↔ laptop delay: about " + avg + " ms on average, worst place " + worst + " ms."));
+  }
+}
+$("wifiToggle").onclick = () => {
+  showWifi = !showWifi;
+  try { localStorage.setItem("showWifi", showWifi ? "1" : "0"); } catch (e) {}
+  drawMap();
+};
 setInterval(drawMap, 5000);   // grey out an old position
+
+// ---------- arrival times (learned from the robot's own trips by eta_estimator on the laptop) ----------
+function fmtTime(s) {
+  if (s < 10) return "a few seconds";
+  if (s < 60) return Math.round(s / 5) * 5 + " s";
+  return Math.round(s / 60) + " min";
+}
+function band(b, elapsed) {            // [estimate, low, high] seconds, counted down since the robot sent it
+  if (!b) return null;
+  const left = b.map(v => Math.max(0, v - elapsed));
+  const range = left[2] - left[1] >= 10 && left[0] >= 20 ? " (" + fmtTime(left[1]) + " – " + fmtTime(left[2]) + ")" : "";
+  return { now: left[0], text: (left[0] < 60 ? "~" : "about ") + fmtTime(left[0]) + range };
+}
+function etaLine(id, r, mine) {
+  if (!eta || !eta.jobs || !eta.jobs[id] || typeof eta.t !== "number") return "";
+  const elapsed = (Date.now() + offset - eta.t) / 1000;
+  if (elapsed > 40) return "";                                   // old estimate: the robot system is not sending
+  const e = eta.jobs[id], sender = r.sender === mine, receiver = r.destination === mine || (current && current.admin);
+  const p = band(e.pickup, elapsed), d = band(e.dropoff, elapsed);
+  const ahead = e.ahead ? " (" + e.ahead + " deliver" + (e.ahead === 1 ? "y" : "ies") + " ahead)" : "";
+  if (r.status === "queued" || r.status === "pending") {
+    if (sender && p) return "The robot comes to you in " + p.text + ahead;
+    if (receiver && d) return "Your parcel should arrive in " + d.text + ahead;
+  } else if (r.status === "going_to_sender") {
+    if (sender && p) return "Arriving at your cabin in " + p.text;
+    if (receiver && d) return "Your parcel should arrive in " + d.text;
+  } else if (r.status === "wait_shipped") {
+    if (receiver && d) return "Your parcel should arrive in " + d.text + " after the sender loads it";
+  } else if (r.status === "going_to_destination") {
+    if (receiver && d) return "Arriving at your cabin in " + d.text;
+    if (sender && d) return "Reaches " + (r.receiverName || "the receiver") + " in " + d.text;
+  } else if (r.status === "returning") {
+    if (sender && p) return "Back at your cabin with the parcel in " + p.text;
+  }
+  return "";
+}
+setInterval(() => { if (eta && current) render(); }, 5000);   // count down between the robot's updates
 
 function render() {
   updateFlash();
@@ -952,6 +1080,8 @@ function render() {
     card.appendChild(el("span", "chip " + s[1], s[0]));
     if (r.urgent) card.appendChild(el("span", "chip urgent", "URGENT"));
     if (r.urgent && r.reason) card.appendChild(el("div", "muted", "Why urgent: " + r.reason));
+    const etaText = etaLine(id, r, mine);
+    if (etaText) card.appendChild(el("div", "eta", "⏱ " + etaText));
     if (r.status === "wait_shipped" && r.sender === mine && !r.shipped && lidMode()) {
       lidSteps(card, id, r.lidSender, "lidSender", "shipped", "put the parcel in", "Close lid & send");
     } else if (r.status === "wait_shipped" && r.sender === mine && !r.shipped) {
@@ -1010,8 +1140,46 @@ function renderRobot() {
   txt.textContent = online ? (robot.detail || robot.state) : "Robot system is offline.";
 }
 
+// ---------- battery (motor battery; "simulated" until the INA219 sensor is fitted) ----------
+function renderBattery() {
+  const box = $("battery");
+  const online = robot && robot.heartbeat && (Date.now() + offset - robot.heartbeat) < 20000;
+  const fresh = battery && typeof battery.t === "number" && (Date.now() + offset - battery.t) < 60000;
+  box.classList.toggle("hidden", !online || !battery);
+  if (!online || !battery) return;
+  box.className = "";
+  box.textContent = "";
+  if (!fresh || battery.error) {
+    box.appendChild(el("span", "muted", battery.error ? "🔋 Battery sensor not answering (check its wires)."
+                                                      : "🔋 No recent battery reading."));
+    return;
+  }
+  if (battery.state === "off") {
+    box.appendChild(el("span", "muted", "🔋 Motor power is switched off (switch on OFF or CHARGE)."));
+    if (battery.source === "sim") box.appendChild(el("span", "chip", "simulated"));
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, battery.pct || 0));
+  box.className = battery.state === "low" || battery.state === "critical" ? battery.state : "";
+  const bar = el("span", "bar"), fill = document.createElement("i");
+  fill.style.width = pct + "%";
+  bar.appendChild(fill);
+  box.appendChild(bar);
+  box.appendChild(el("strong", "", pct + " %"));
+  const words = { charging: "charging", low: "low: charge soon", critical: "very low: charge now" };
+  let text = (words[battery.state] ? words[battery.state] + " · " : "") + battery.v.toFixed(1) + " V";
+  if (battery.state !== "charging") text += " · " + battery.a.toFixed(1) + " A";
+  if (current && current.admin) {
+    text += " · used since start " + battery.wh.toFixed(2) + " Wh";
+    if (battery.r_ohm) text += " · resistance " + battery.r_ohm.toFixed(2) + " Ω";
+    if (battery.over_range) text += " · current above the sensor's range (motor stalled?)";
+  }
+  box.appendChild(el("span", "muted", text));
+  if (battery.source === "sim") box.appendChild(el("span", "chip", "simulated"));
+}
+
 db.ref(".info/serverTimeOffset").on("value", s => { offset = s.val() || 0; renderRobot(); });
-setInterval(renderRobot, 5000);
+setInterval(() => { renderRobot(); renderBattery(); }, 5000);
 </script>
 </body>
 </html>

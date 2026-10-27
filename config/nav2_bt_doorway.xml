@@ -4,6 +4,8 @@
   In 70 cm doorways every Spin was refused ("Collision Ahead", 27 times in one trip) or turned the robot further off
   the doorway; the controller then found "No valid trajectories" again. Without Spin the recovery only clears the
   costmaps and waits, and the controller (which knows the body shape) works its own way out.
+  server_timeout="200": Foxy waits only 10 ms by default for the planner/controller to accept a goal; on a busy
+  laptop that gave "send_goal failed" and then a bt_navigator crash (simulator 2026-10-27).
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -11,21 +13,21 @@
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            <ComputePathToPose server_timeout="200" goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap server_timeout="200" name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
         </RateController>
         <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="FollowPath"/>
-          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <FollowPath server_timeout="200" path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap server_timeout="200" name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
         </RecoveryNode>
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
         <SequenceStar name="RecoveryActions">
-          <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-          <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-          <Wait wait_duration="2"/>
+          <ClearEntireCostmap server_timeout="200" name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <ClearEntireCostmap server_timeout="200" name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          <Wait server_timeout="200" wait_duration="2"/>
         </SequenceStar>
       </ReactiveFallback>
     </RecoveryNode>

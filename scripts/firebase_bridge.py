@@ -12,6 +12,12 @@ Database layout (see web/index.html for the writer side):
   /spots          {home|cabin_X: {x, y, yaw, by, t}}   spots on the current map; written by the Admin on the website
                   (seeded from locations_file when the map changes; /spotsMap = the map they belong to)
   /spotStatus     {name: {ok, msg, t}}   the robot's check of each spot (free floor, distance to walls, reachable)
+  /eta            {t, model, jobs: {<request id>: {pickup: [s, lo, hi], dropoff: [s, lo, hi], ahead, phase}}}
+                  from eta_estimator.py, at most every 3 s (the website counts down from t)
+  /battery        {source, v, a, w, pct, wh, state, r_ohm, over_range, t} from battery_monitor.py, every 10 s or
+                  when the % or state changes (at most every 3 s); source 'sim' = simulated, no sensor fitted yet
+  /wifiMap        {map, cell, t, cells: {i_j: [mean_dbm, worst_dbm, readings, rtt_ms, lost_pct]}} Wi-Fi coverage
+                  from wifi_mapper.py, at most every 15 s
   /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
   /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
                   when -p map_yaml:=<map .yaml> is given (the website draws the map, the spots and the robot)
@@ -113,6 +119,15 @@ class FirebaseBridge(Node):
         self.cancel_pub = self.create_publisher(String, '/delivery_cancel', 10)
         self.estop_pub = self.create_publisher(String, '/delivery_estop', 10)
         self.reload_pub = self.create_publisher(Empty, '/delivery_reload_spots', 10)
+        self.create_subscription(String, '/delivery_eta', self._on_eta, 10)
+        self.last_eta, self.last_eta_sent = None, 0.0
+        self.create_subscription(String, '/battery_status', self._on_battery, QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
+        self.last_battery, self.last_battery_sent = None, 0.0
+        self.create_subscription(String, '/wifi_map', self._on_wifi_map, QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
+        self.wifi_pending, self.wifi_sent = None, 0.0
+        self.create_timer(5.0, self._send_wifi_map)
         self.grid = None                 # map for checking spots: (free bool array, wall distance m, res, ox, oy, h)
         self.spots_applied = None        # the /spots content last applied (to notice changes)
         self.spots_seeded = False
@@ -480,6 +495,9 @@ class FirebaseBridge(Node):
         can = st.get('cancelled_ref')
         if can:
             self._queue_patch(can, 'cancelled', 'Cancelled by the sender.')
+        req = st.get('requeued_ref')           # battery very low before pick-up: the job waits in the queue again
+        if req and self.written.get(req) not in FINAL:
+            self._queue_patch(req, 'queued', 'Back in the queue: the robot went home to charge')
         ref, result = st.get('ref'), st.get('result')
         if ref:
             if result:
@@ -491,6 +509,46 @@ class FirebaseBridge(Node):
                     (self.written.get(ref) != status or self.written_detail.get(ref) != detail):
                 self._queue_patch(ref, status, detail)
         self.out.put(('PUT', 'robot', self._robot_body(), None))
+
+    def _on_eta(self, msg):
+        """Forward the ETA estimate to the website when it changed, at most every 3 s."""
+        try:
+            eta = json.loads(msg.data)
+        except ValueError:
+            return
+        now = time.monotonic()
+        if eta.get('jobs') == self.last_eta and now - self.last_eta_sent < 15.0 or now - self.last_eta_sent < 3.0:
+            return
+        self.last_eta, self.last_eta_sent = eta.get('jobs'), now
+        eta['t'] = {'.sv': 'timestamp'}
+        self.out.put(('PUT', 'eta', eta, None))
+
+    def _on_battery(self, msg):
+        """Forward the battery to the website: every 10 s, or sooner (at most every 3 s) when % or state changed."""
+        try:
+            b = json.loads(msg.data)
+        except ValueError:
+            return
+        now = time.monotonic()
+        key = (b.get('pct'), b.get('state'), b.get('error'))
+        if now - self.last_battery_sent < 3.0 or key == self.last_battery and now - self.last_battery_sent < 10.0:
+            return
+        self.last_battery, self.last_battery_sent = key, now
+        b['t'] = {'.sv': 'timestamp'}
+        self.out.put(('PUT', 'battery', b, None))
+
+    def _on_wifi_map(self, msg):
+        try:
+            self.wifi_pending = json.loads(msg.data)
+        except ValueError:
+            pass
+
+    def _send_wifi_map(self):
+        """The newest Wi-Fi coverage map, at most every 15 s (it can hold a few hundred squares)."""
+        if self.wifi_pending is None or time.monotonic() - self.wifi_sent < 15.0:
+            return
+        body, self.wifi_pending, self.wifi_sent = self.wifi_pending, None, time.monotonic()
+        self.out.put(('PUT', 'wifiMap', body, None))
 
     # ---------- live map ----------
     def _map_body(self):
