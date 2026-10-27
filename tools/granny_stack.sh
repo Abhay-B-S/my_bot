@@ -1,7 +1,7 @@
 #!/bin/bash
 # laptop side for the granny_home map: twist_mux, localisation, Nav2, self-recovery, path guard, manager, bridge
 S=${S:-$HOME/dev_ws/run_logs}; mkdir -p $S/logs   # logs survive reboots (was a /tmp scratch folder)
-MAP=granny_home; SPOTS=./src/my_bot/config/locations_granny_home.yaml
+MAP=${MAP:-granny_home}; SPOTS=${SPOTS:-./src/my_bot/config/locations_$MAP.yaml}   # e.g. MAP=granny_explored6 bash ...
 cd ~/dev_ws; source /opt/ros/foxy/setup.bash; source install/setup.bash
 wait_for() { timeout $3 bash -c "until grep -q '$2' $1 2>/dev/null; do sleep 2; done"; }
 ros2 run twist_mux twist_mux --ros-args --params-file ./src/my_bot/config/twist_mux.yaml -r cmd_vel_out:=diff_cont/cmd_vel_unstamped > $S/logs/g_mux.log 2>&1 &
@@ -20,6 +20,8 @@ python3 -u src/my_bot/scripts/change_detector.py --ros-args -p map_name:=$MAP > 
 python3 -u src/my_bot/scripts/eta_estimator.py --ros-args -p locations_file:=$SPOTS > $S/logs/g_eta.log 2>&1 &
 if [ "${LID:-0}" = "sim" ]; then
   python3 -u src/my_bot/scripts/cargo_controller.py --ros-args -p simulate:=true > $S/logs/g_cargo_sim.log 2>&1 &
+  LIDARGS="-p cargo_lock:=true -p lid_buttons:=true"
+elif [ "${LID:-0}" = "real" ]; then   # the real lid: cargo_controller runs ON THE PI (start it there with ~/start_all.sh lid)
   LIDARGS="-p cargo_lock:=true -p lid_buttons:=true"
 fi
 python3 -u src/my_bot/scripts/delivery_manager.py --ros-args -p locations_file:=$SPOTS -p self_recovery:=true -p path_guard:=true $LIDARGS > $S/logs/g_manager.log 2>&1 &

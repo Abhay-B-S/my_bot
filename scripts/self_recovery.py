@@ -18,6 +18,10 @@ or localisation simply drifts away. AMCL then keeps believing the old position.
    `good_checks` checks, publish "recovered"; the manager continues the delivery.
 It never turns when something is closer than `clear_radius` to the axle (the back end swings ~0.29 m). A
 2D Pose Estimate in RViz that makes the lidar fit the map again also counts as "recovered".
+The parcel lid: when open it stands in front of the lidar (measured 2026-10-27: about 135 degrees ahead blocked,
+returns at 0.10-0.14 m or none). So points closer than `self_radius` to the lidar never count for the match (lid,
+body, cables), and while /cargo_state says the lid is moving or open the robot is never declared lost and never
+turns (it is standing at a cabin and someone may be at the box).
 
   python3 src/my_bot/scripts/self_recovery.py        (real robot and simulation alike: it uses wall-clock timers)
 Topics: in /map, /scan, TF map->laser_frame, base_link->laser_frame;  out /localization_status (String, latched),
@@ -64,6 +68,7 @@ class SelfRecovery(Node):
             'clear_radius': 0.33,     # m around the axle that must be free before turning
             'max_range': 6.0,         # ignore far scan points (less reliable)
             'cooldown': 10.0,         # s after a recovery before another can start
+            'self_radius': 0.20,      # m from the lidar: closer points are the robot itself or its open lid
         }
         for k, v in defaults.items():
             self.declare_parameter(k, v)
@@ -72,6 +77,8 @@ class SelfRecovery(Node):
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(OccupancyGrid, '/map', self._on_map, latched)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
+        self.lid_open = False        # /cargo_state "moving" or "unlocked": the lid may be up in front of the lidar
+        self.create_subscription(String, '/cargo_state', self._on_cargo_state, latched)
         self.status_pub = self.create_publisher(String, '/localization_status', latched)
         self.match_pub = self.create_publisher(String, '/localization_match', 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel_recovery', 10)
@@ -121,26 +128,35 @@ class SelfRecovery(Node):
     def _on_scan(self, s):
         self.scan = s
 
+    def _on_cargo_state(self, msg):
+        lid_open = msg.data in ('moving', 'unlocked')
+        if lid_open != self.lid_open:
+            self.get_logger().info('Lid %s: %s' % (msg.data, 'not judging the position while it may block the lidar'
+                                                   if lid_open else 'judging the position again'))
+        self.lid_open = lid_open
+
     # ---------- scan helpers ----------
-    def _scan_polar(self, max_points=None):
-        """Valid scan (ranges, angles) in the laser frame, optionally thinned to max_points."""
+    def _scan_polar(self, max_points=None, near_too=False):
+        """Valid scan (ranges, angles) in the laser frame, optionally thinned to max_points. Points closer than
+        self_radius (the robot itself, the open lid) are left out unless near_too."""
         s = self.scan
         r = np.array(s.ranges, dtype=np.float64)
         a = s.angle_min + np.arange(len(r)) * s.angle_increment
-        ok = np.isfinite(r) & (r > s.range_min) & (r < min(s.range_max, self.p['max_range']))
+        near = s.range_min if near_too else max(s.range_min, self.p['self_radius'])
+        ok = np.isfinite(r) & (r > near) & (r < min(s.range_max, self.p['max_range']))
         r, a = r[ok], a[ok]
         if max_points and len(r) > max_points:
             idx = np.linspace(0, len(r) - 1, max_points).astype(int)
             r, a = r[idx], a[idx]
         return r, a
 
-    def _points(self, frame):
+    def _points(self, frame, near_too=False):
         """Scan points (x, y) in `frame`, or None when the transform is not available."""
         try:
             t = self.tf_buffer.lookup_transform(frame, self.scan.header.frame_id, Time())
         except Exception:
             return None
-        r, a = self._scan_polar()
+        r, a = self._scan_polar(near_too=near_too)
         yaw = yaw_of(t.transform.rotation)
         return t.transform.translation.x + r * np.cos(a + yaw), t.transform.translation.y + r * np.sin(a + yaw)
 
@@ -164,7 +180,7 @@ class SelfRecovery(Node):
 
     def _space_to_turn(self):
         """True when nothing is closer than clear_radius to the axle (base_link)."""
-        pts = self._points('base_link')
+        pts = self._points('base_link', near_too=True)       # every point counts for the room to turn
         if pts is None:
             return False
         d = np.hypot(pts[0], pts[1])
@@ -262,6 +278,9 @@ class SelfRecovery(Node):
                 self.get_logger().info('match %.0f %% (%s)' % (100 * m, self.state))
 
         if self.state == OK:
+            if self.lid_open:                    # the lid may hide a third of the view: no judgement now
+                self.low_since = None
+                return
             if m is not None and m < self.p['lost_threshold'] and now > self.cooldown_until:
                 self.low_since = self.low_since or now
                 if now - self.low_since >= self.p['lost_seconds']:
@@ -325,7 +344,7 @@ class SelfRecovery(Node):
         self._status(TURNING, 'turning %.0f deg for a new view' % self.p['turn_step_deg'])
 
     def _drive(self):
-        if self.state == TURNING and time.monotonic() < self.turn_until and self.searches > 0:
+        if self.state == TURNING and time.monotonic() < self.turn_until and self.searches > 0 and not self.lid_open:
             t = Twist()
             t.angular.z = self.p['turn_speed']
             self.cmd_pub.publish(t)
