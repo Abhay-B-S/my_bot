@@ -1,7 +1,7 @@
 #!/bin/bash
 # The whole delivery system in the simulator (Gazebo loop.world, map sim_loop, spots locations_sim_loop):
 # twist_mux (inside launch_sim), localisation, Nav2, self-recovery, path guard, gap assist, delivery manager,
-# event logger, ETA estimator, simulated battery (manager checks it before each job), simulated Wi-Fi map. No website bridge (BRIDGE=1 adds it).
+# event logger, ETA estimator, simulated battery (manager checks it before each job), simulated Wi-Fi map, map changes. No website bridge (BRIDGE=1 adds it).
 #   bash src/my_bot/tools/sim_stack.sh            (from ~/dev_ws; Ctrl-C stops everything)
 # Logs: ~/dev_ws/run_logs/logs/s_*.log, events: ~/dev_ws/run_logs/sim_events.jsonl
 S=${S:-$HOME/dev_ws/run_logs}; mkdir -p $S/logs
@@ -28,6 +28,7 @@ python3 -u src/my_bot/scripts/battery_monitor.py --ros-args -p source:=sim > $S/
 python3 -u src/my_bot/scripts/event_logger.py $SIMT -p log_file:=$S/sim_events.jsonl > $S/logs/s_events.log 2>&1 &
 python3 -u src/my_bot/scripts/wifi_probe.py $SIMT -p source:=sim > $S/logs/s_wifi_probe.log 2>&1 &     # made-up Wi-Fi
 python3 -u src/my_bot/scripts/wifi_mapper.py $SIMT -p map_name:=$MAP -p out_dir:=$S > $S/logs/s_wifi_map.log 2>&1 &
+python3 -u src/my_bot/scripts/change_detector.py $SIMT -p map_name:=$MAP -p out_dir:=$S > $S/logs/s_changes.log 2>&1 &
 python3 -u src/my_bot/scripts/eta_estimator.py $SIMT -p locations_file:=$SPOTS -p log_file:=$S/sim_events.jsonl \
     > $S/logs/s_eta.log 2>&1 &
 python3 -u src/my_bot/scripts/delivery_manager.py $SIMT -p locations_file:=$SPOTS -p self_recovery:=true \

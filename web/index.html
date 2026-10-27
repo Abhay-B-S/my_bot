@@ -69,6 +69,12 @@
   #wifiToggle.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   #wifiText { margin-top: 6px; }
   #wifiText .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 3px 0 8px; }
+  .maptoggles { display: flex; gap: 8px; flex-wrap: wrap; }
+  #changesToggle { width: auto; margin: 10px 0 0; padding: 8px 12px; font-size: .9rem; }
+  #changesToggle.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  #changesText { margin-top: 6px; }
+  #changesText ul { margin: 4px 0 0; padding-left: 18px; }
+  #changesText .key { display: inline-block; width: 12px; height: 10px; margin: 0 3px 0 8px; vertical-align: -1px; }
   /* emergency stop, urgent requests, cancel */
   button.danger { background: var(--bad); color: #ffffff; }
   button.quiet { background: var(--bg); color: var(--text); border: 1px solid var(--line); }
@@ -218,8 +224,12 @@
       <h2>Where is the robot</h2>
       <canvas id="mapCanvas"></canvas>
       <div id="mapText" class="muted"></div>
-      <button id="wifiToggle" class="quiet" type="button">📶 Show Wi-Fi signal</button>
+      <div class="maptoggles">
+        <button id="wifiToggle" class="quiet" type="button">📶 Show Wi-Fi signal</button>
+        <button id="changesToggle" class="quiet" type="button">🔍 Show changes</button>
+      </div>
       <div id="wifiText" class="muted hidden"></div>
+      <div id="changesText" class="muted hidden"></div>
     </div>
   </div>
 
@@ -280,7 +290,7 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
 
 const $ = id => document.getElementById(id);
 let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, lastDetail = {}, unsub = [];
-let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {}, eta = null, battery = null, wifiMap = null;
+let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {}, eta = null, battery = null, wifiMap = null, mapChanges = null;
 const ADMIN_ID = "admin";
 
 function cabinLabel(c) { return c.replace("_", " "); }
@@ -363,6 +373,7 @@ function startApp() {
     listen(db.ref("eta"), s => { eta = s.val(); render(); });
     listen(db.ref("battery"), s => { battery = s.val(); renderBattery(); });
     listen(db.ref("wifiMap"), s => { wifiMap = s.val(); drawMap(); });
+    listen(db.ref("mapChanges"), s => { mapChanges = s.val(); drawMap(); });
     return;
   }
   $("whoName").textContent = current.name;
@@ -376,6 +387,7 @@ function startApp() {
   listen(db.ref("eta"), s => { eta = s.val(); render(); });
   listen(db.ref("battery"), s => { battery = s.val(); renderBattery(); });
   listen(db.ref("wifiMap"), s => { wifiMap = s.val(); drawMap(); });
+  listen(db.ref("mapChanges"), s => { mapChanges = s.val(); drawMap(); });
 }
 
 function listen(ref, cb) {
@@ -919,6 +931,7 @@ function drawMap() {
   const res = mapInfo.resolution;
   const toPx = (x, y) => [(x - mapInfo.originX) / res * s, h - (y - mapInfo.originY) / res * s];
   drawWifi(ctx, toPx, res, s);
+  drawChanges(ctx, toPx);
 
   // spots: the current job's pickup (orange) and destination (green) stand out
   const job = robot && robot.ref ? requests[robot.ref] : null;
@@ -946,6 +959,7 @@ function drawMap() {
     ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
   }
   renderWifiText();
+  renderChangesText();
   $("mapText").textContent = !pose ? "Robot position not known yet."
     : fresh ? "Live position" + (job ? " · orange = pickup, green = destination" : "")
     : "Last known position (the robot system is offline or not localised).";
@@ -1014,6 +1028,74 @@ function renderWifiText() {
     box.appendChild(el("div", "", "Robot ↔ laptop delay: about " + avg + " ms on average, worst place " + worst + " ms."));
   }
 }
+// ---------- what changed (change_detector on the laptop: lidar vs saved map, plus trouble spots from the event log) ----------
+let showChanges = false;
+try { showChanges = localStorage.getItem("showChanges") === "1"; } catch (e) {}
+function changesNow() {
+  if (!mapChanges || !mapInfo || (mapChanges.map && mapInfo.name && mapChanges.map !== mapInfo.name.replace(/\.yaml$/, "")))
+    return { changes: [], trouble: [] };
+  return { changes: mapChanges.changes || [], trouble: mapChanges.trouble || [] };
+}
+function drawChanges(ctx, toPx) {
+  if (!showChanges) return;
+  const { changes, trouble } = changesNow();
+  changes.forEach(c => {
+    const [x0, y0] = toPx(c.x - c.w / 2, c.y + c.h / 2), [x1, y1] = toPx(c.x + c.w / 2, c.y - c.h / 2);
+    const w = Math.max(x1 - x0, 6), h = Math.max(y1 - y0, 6), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    if (c.kind === "new") {
+      ctx.fillStyle = "rgba(112,72,232,0.75)"; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5; ctx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+    } else {
+      ctx.setLineDash([4, 3]); ctx.strokeStyle = "#1971c2"; ctx.lineWidth = 2.5;
+      ctx.strokeRect(cx - w / 2 - 2, cy - h / 2 - 2, w + 4, h + 4); ctx.setLineDash([]);
+    }
+  });
+  trouble.forEach(t => {
+    const [x, y] = toPx(t.x, t.y), r = Math.min(6 + 2 * t.n, 14);
+    ctx.fillStyle = "rgba(232,89,12,0.85)"; ctx.beginPath();
+    ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.9, y + r * 0.6); ctx.lineTo(x - r * 0.9, y + r * 0.6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.font = "700 10px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(String(t.n), x, y + r * 0.2); ctx.textAlign = "start";
+  });
+}
+function nearSpot(x, y) {            // "near Cabin B" (the closest spot), for the plain-language list
+  let best = null, bd = Infinity;
+  Object.entries(spotsNow()).forEach(([name, p]) => { const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = name; } });
+  return best ? (bd < 0.4 ? "at " : "near ") + spotLabel(best) : "on the map";
+}
+function sizeText(c) {
+  const a = Math.round(Math.max(c.w, c.h) * 100), b = Math.round(Math.min(c.w, c.h) * 100);
+  return a >= 100 ? (Math.max(c.w, c.h)).toFixed(1) + " m long" : a + " × " + b + " cm";
+}
+function renderChangesText() {
+  const box = $("changesText"), btn = $("changesToggle");
+  btn.classList.toggle("on", showChanges);
+  btn.textContent = showChanges ? "🔍 Hide changes" : "🔍 Show changes";
+  box.classList.toggle("hidden", !showChanges);
+  if (!showChanges) return;
+  const { changes, trouble } = changesNow();
+  box.textContent = "";
+  if (!changes.length && !trouble.length) {
+    box.textContent = "No changes found: the building matches the saved map where the robot has driven.";
+    return;
+  }
+  const legend = el("div", "");
+  [["rgba(112,72,232,0.75)", "new object"], ["#1971c2", "removed / moved"], ["rgba(232,89,12,0.85)", "trouble spot"]]
+    .forEach(([c, t]) => { const k = el("span", "key"); k.style.background = c; legend.appendChild(k); legend.appendChild(document.createTextNode(t)); });
+  box.appendChild(legend);
+  const ul = document.createElement("ul");
+  const time = t => t ? new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  changes.forEach(c => ul.appendChild(el("li", "", (c.kind === "new" ? "New object " : "Missing compared with the map: ") +
+    nearSpot(c.x, c.y) + " (" + sizeText(c) + ")" + (c.first ? ", since " + time(c.first) : ""))));
+  trouble.slice().sort((a, b) => b.n - a.n).slice(0, 6).forEach(t => ul.appendChild(el("li", "", "Trouble " + nearSpot(t.x, t.y) +
+    ": " + Object.entries(t.kinds).map(([k, n]) => k + (n > 1 ? " ×" + n : "")).join(", ") + (t.last ? " (last " + time(t.last) + ")" : ""))));
+  box.appendChild(ul);
+}
+$("changesToggle").onclick = () => {
+  showChanges = !showChanges;
+  try { localStorage.setItem("showChanges", showChanges ? "1" : "0"); } catch (e) {}
+  drawMap();
+};
 $("wifiToggle").onclick = () => {
   showWifi = !showWifi;
   try { localStorage.setItem("showWifi", showWifi ? "1" : "0"); } catch (e) {}

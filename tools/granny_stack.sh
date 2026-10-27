@@ -16,6 +16,7 @@ python3 -u src/my_bot/scripts/path_guard.py > $S/logs/g_guard.log 2>&1 &
 python3 -u src/my_bot/scripts/gap_assist.py > $S/logs/g_assist.log 2>&1 &
 python3 -u src/my_bot/scripts/event_logger.py > $S/logs/g_events.log 2>&1 &
 python3 -u src/my_bot/scripts/wifi_mapper.py --ros-args -p map_name:=$MAP > $S/logs/g_wifi_map.log 2>&1 &
+python3 -u src/my_bot/scripts/change_detector.py --ros-args -p map_name:=$MAP > $S/logs/g_changes.log 2>&1 &
 python3 -u src/my_bot/scripts/eta_estimator.py --ros-args -p locations_file:=$SPOTS > $S/logs/g_eta.log 2>&1 &
 if [ "${LID:-0}" = "sim" ]; then
   python3 -u src/my_bot/scripts/cargo_controller.py --ros-args -p simulate:=true > $S/logs/g_cargo_sim.log 2>&1 &

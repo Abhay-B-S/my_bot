@@ -18,6 +18,8 @@ Database layout (see web/index.html for the writer side):
                   when the % or state changes (at most every 3 s); source 'sim' = simulated, no sensor fitted yet
   /wifiMap        {map, cell, t, cells: {i_j: [mean_dbm, worst_dbm, readings, rtt_ms, lost_pct]}} Wi-Fi coverage
                   from wifi_mapper.py, at most every 15 s
+  /mapChanges     {map, t, changes: [{kind new|gone, x, y, w, h, cells, first, last}], trouble: [{x, y, n, kinds,
+                  last, text}]} from change_detector.py, at most every 15 s
   /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
   /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
                   when -p map_yaml:=<map .yaml> is given (the website draws the map, the spots and the robot)
@@ -127,6 +129,9 @@ class FirebaseBridge(Node):
         self.create_subscription(String, '/wifi_map', self._on_wifi_map, QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
         self.wifi_pending, self.wifi_sent = None, 0.0
+        self.create_subscription(String, '/map_changes', self._on_map_changes, QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
+        self.changes_pending, self.changes_sent = None, 0.0
         self.create_timer(5.0, self._send_wifi_map)
         self.grid = None                 # map for checking spots: (free bool array, wall distance m, res, ox, oy, h)
         self.spots_applied = None        # the /spots content last applied (to notice changes)
@@ -543,12 +548,21 @@ class FirebaseBridge(Node):
         except ValueError:
             pass
 
+    def _on_map_changes(self, msg):
+        try:
+            self.changes_pending = json.loads(msg.data)
+        except ValueError:
+            pass
+
     def _send_wifi_map(self):
-        """The newest Wi-Fi coverage map, at most every 15 s (it can hold a few hundred squares)."""
-        if self.wifi_pending is None or time.monotonic() - self.wifi_sent < 15.0:
-            return
-        body, self.wifi_pending, self.wifi_sent = self.wifi_pending, None, time.monotonic()
-        self.out.put(('PUT', 'wifiMap', body, None))
+        """The newest Wi-Fi coverage map and map changes, each at most every 15 s."""
+        now = time.monotonic()
+        if self.wifi_pending is not None and now - self.wifi_sent >= 15.0:
+            body, self.wifi_pending, self.wifi_sent = self.wifi_pending, None, now
+            self.out.put(('PUT', 'wifiMap', body, None))
+        if self.changes_pending is not None and now - self.changes_sent >= 15.0:
+            body, self.changes_pending, self.changes_sent = self.changes_pending, None, now
+            self.out.put(('PUT', 'mapChanges', body, None))
 
     # ---------- live map ----------
     def _map_body(self):

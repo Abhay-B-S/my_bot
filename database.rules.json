@@ -67,6 +67,11 @@
       ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
     },
 
+    "mapChanges": {
+      ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
+      ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
+    },
+
     "spotStatus": {
       ".read": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).exists()",
       ".write": "auth != null && root.child('members').child(auth.token.email.replace('@example.com', '')).child('role').val() == 'robot'"
