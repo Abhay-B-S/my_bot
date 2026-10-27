@@ -217,6 +217,10 @@ class GapAssist(Node):
             'drive_distance': 0.5,    # m driven straight once lined up
             'step_deg': 15.0,         # turn in steps of at most this many degrees, then choose again
             'goal_free': 0.40,        # m free straight ahead along the route = way out found
+            'goal_near': 0.35,        # m: this close to the goal Nav2 is only turning to the spot's heading; never help
+                                      # there (real test 2026-10-27: 12 cm from cabin B the plan was too short to give a
+                                      # direction, the helper drove 0.45 m straight ahead and left the robot 0.5 m past
+                                      # the spot, facing away from it)
             'route_tol_deg': 30.0,    # ... while pointing within this of the route
             'max_moves': 6,           # longest move sequence searched (moves of 15 or 45 deg, 10 or 30 cm)
             'backward_arcs': False,   # turns round a wheel that drive the other wheel BACKWARDS at full speed: a
@@ -314,6 +318,19 @@ class GapAssist(Node):
         inside = (pts[:, 0] < f) & (pts[:, 0] > -b) & (np.abs(pts[:, 1]) < box)   # the robot's own parts
         return pts[~inside]
 
+    def _goal_distance(self):
+        """Distance (m) from the robot to the end of the plan (the goal), or None."""
+        try:
+            t = self.tf.lookup_transform('base_link', self.plan.header.frame_id, Time())
+        except Exception:
+            return None
+        g = self.plan.poses[-1].pose.position
+        q = t.transform.rotation
+        yaw = 2 * math.atan2(q.z, q.w)
+        x = t.transform.translation.x + g.x * math.cos(yaw) - g.y * math.sin(yaw)
+        y = t.transform.translation.y + g.x * math.sin(yaw) + g.y * math.cos(yaw)
+        return math.hypot(x, y)
+
     def _route_angle(self):
         """Direction (rad, robot frame) of the plan `route_look_ahead` m ahead of the robot, or None."""
         try:
@@ -371,10 +388,14 @@ class GapAssist(Node):
                 or self.assists >= self.p['max_assists'] or now - self.nav_stuck_at > 3.0
                 or now - self.still_since < self.p['stuck_seconds']):
             return
+        near = self._goal_distance() if self.plan.poses else None
+        if near is not None and near < self.p['goal_near']:
+            return                     # at the goal: Nav2 only turns to its heading (the manager accepts "close enough")
         self.assists += 1
         self._status('Nav2 is stuck in a narrow spot: lining up with the gap (try %d of %d)'
                      % (self.assists, self.p['max_assists']))
         self.steps, self.then_plan, self.no_straight = 0, False, False
+        self.commit_sign = 0          # turning direction kept while the route is behind the robot
         self._plan_step(now)
 
     def _plan_step(self, now):
@@ -402,12 +423,23 @@ class GapAssist(Node):
             self._status('lined up: driving straight %.2f m' % self.drive_left)
             return
         tight = min(clearances(pts, self.body).values()) < 0.10
+        # route almost behind the robot: +170 and -170 deg are nearly the same way, and with every re-plan the sign
+        # flipped, so the robot turned 45 deg left, then right, then left ("dancing", real test 2026-10-27).
+        # Pick one turning direction and keep it until the robot is lined up.
+        sign = 0
+        if not wide and abs(route) > math.radians(120):
+            if not self.commit_sign:
+                self.commit_sign = 1 if route > 0 else -1
+            sign = self.commit_sign
         found = None
-        for margin in (self.p['margin'], self.p['margin_tight']):    # the tight margin only if nothing else fits
-            found = plan_moves(pts, route, self.body, margin, self.pivots, step, self.p['goal_free'], tol,
-                               self.p['max_moves'], backward_arcs=self.p['backward_arcs'])
+        for turn_sign in ((sign, 0) if sign else (0,)):          # without the kept direction only if nothing fits
+            for margin in (self.p['margin'], self.p['margin_tight']):    # the tight margin only if nothing else fits
+                found = plan_moves(pts, route, self.body, margin, self.pivots, step, self.p['goal_free'], tol,
+                                   self.p['max_moves'], turn_sign=turn_sign, backward_arcs=self.p['backward_arcs'])
+                if found:
+                    self.turn_margin = margin / 2         # kept while turning (live check)
+                    break
             if found:
-                self.turn_margin = margin / 2         # kept while turning (live check)
                 break
         if found is None and len(pts):                # already at a wall: the first move must turn away from it
             near = pts[int(np.argmin(np.hypot(pts[:, 0], pts[:, 1])))]

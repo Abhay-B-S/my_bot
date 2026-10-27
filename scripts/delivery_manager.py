@@ -127,6 +127,12 @@ class DeliveryManager(Node):
         self.declare_parameter('energy_file', '~/dev_ws/run_logs/energy_model.json')
         self.declare_parameter('battery_trust_sim', False)    # act on a SIMULATED battery too (tests in Gazebo only;
                                                               # never on the real robot: its numbers are made up)
+        self.declare_parameter('close_enough', 0.35)          # m: within this of the spot counts as arrived when Nav2
+                                                              # gives up or keeps trying only to turn to the spot's
+                                                              # heading for `close_enough_seconds` (real test 2026-10-27:
+                                                              # 12 cm from cabin B, the final 57 deg turn failed in a
+                                                              # tight corner and the robot ended up 0.5 m past it)
+        self.declare_parameter('close_enough_seconds', 8.0)
         self.declare_parameter('arrival_check', 0.5)          # metres; Nav2 "arrived" is only believed if the robot
                                                               # is really this close to the spot (0 = do not check)
 
@@ -227,6 +233,7 @@ class DeliveryManager(Node):
         self.goal_handle = None
         self.goal_gen = 0          # counts goals sent, to ignore callbacks of abandoned goals
         self.goal_started = 0.0
+        self.near_since = None     # since when the robot stands within close_enough of the spot it drives to
         self.retries = 0
         self.deadline = None
         self.dry_until = 0.0
@@ -636,6 +643,7 @@ class DeliveryManager(Node):
     def _send_goal(self, name):
         self.navigating = True
         self.goal_started = time.monotonic()
+        self.near_since = None
         if self.dry_run:
             self.dry_until = time.monotonic() + 3.0
             self.get_logger().info('(dry run) driving to %s' % name)
@@ -675,8 +683,19 @@ class DeliveryManager(Node):
                 self._nav_failed('Nav2 said "arrived" but the robot is %.2f m from %s' % (off, self._current_target()))
                 return
             self._arrived()
+        elif self._close_enough():
+            self._arrived()
         else:
             self._nav_failed('Nav2 finished with status %d' % status)
+
+    def _close_enough(self):
+        """True (and logged) when the robot stands within close_enough of the spot it is driving to."""
+        off = self._distance_to(self._current_target())
+        if off is None or off > self.get_parameter('close_enough').value:
+            return False
+        self.get_logger().info('%.2f m from %s: close enough, counted as arrived (the exact heading does not matter '
+                               'for handing over a parcel)' % (off, self._current_target()))
+        return True
 
     def _distance_to(self, name):
         """Distance (m) from the robot's real map position to a spot, or None when unknown (dry run, no TF)."""
@@ -690,8 +709,18 @@ class DeliveryManager(Node):
         return math.hypot(float(p['x']) - t.x, float(p['y']) - t.y)
 
     def _watch_goal(self, now):
-        """Safety nets for a goal whose result never arrives."""
+        """Safety nets for a goal whose result never arrives, or that only turns on the spot at the end."""
         h = self.goal_handle
+        off = self._distance_to(self._current_target())
+        if off is not None and off <= self.get_parameter('close_enough').value:
+            self.near_since = self.near_since or now
+            if now - self.near_since >= self.get_parameter('close_enough_seconds').value and self._close_enough():
+                self.near_since = None
+                self._abandon_goal()          # stop Nav2 turning to the exact heading in a tight corner
+                self._arrived()
+                return
+        else:
+            self.near_since = None
         ended = (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED)
         if h is not None and h.status in ended and now - self.goal_started > 2.0:
             self.get_logger().warn('Nav2 reports status %d but the result message is missing: using it' % h.status)
