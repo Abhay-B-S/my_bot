@@ -20,6 +20,11 @@ Database layout (see web/index.html for the writer side):
                   from wifi_mapper.py, at most every 15 s
   /mapChanges     {map, t, changes: [{kind new|gone, x, y, w, h, cells, first, last}], trouble: [{x, y, n, kinds,
                   last, text}]} from change_detector.py, at most every 15 s
+  /timeline/<request id>  [{t, icon, text, kind}]  the "Why?" timeline: what happened during that delivery, in plain
+                  words, from event_logger's /robot_event (at most every 3 s; the newest `timeline_keep` deliveries)
+  /stats          {t, today, all}  delivery statistics from delivery_stats.py (Admin page)
+  /health         {t, overall, checks: [{name, level, text}]}  health check from health_check.py (Admin page)
+  /adminCmd       {forgetChanges: t}  written by the Admin; a new value -> /map_changes/reset (forget all changes)
   /pose           {x, y, yaw, t}   robot position on the map (map -> base_link), about once a second while moving
   /map            {png, resolution, originX, originY, width, height, spots, name}   written once at start-up
                   when -p map_yaml:=<map .yaml> is given (the website draws the map, the spots and the robot)
@@ -121,6 +126,8 @@ class FirebaseBridge(Node):
         self.cancel_pub = self.create_publisher(String, '/delivery_cancel', 10)
         self.estop_pub = self.create_publisher(String, '/delivery_estop', 10)
         self.reload_pub = self.create_publisher(Empty, '/delivery_reload_spots', 10)
+        self.forget_changes_pub = self.create_publisher(Empty, '/map_changes/reset', 10)
+        self.admin_cmd = None              # last /adminCmd seen (the first one only sets the baseline)
         self.create_subscription(String, '/delivery_eta', self._on_eta, 10)
         self.last_eta, self.last_eta_sent = None, 0.0
         self.create_subscription(String, '/battery_status', self._on_battery, QoSProfile(
@@ -132,6 +139,15 @@ class FirebaseBridge(Node):
         self.create_subscription(String, '/map_changes', self._on_map_changes, QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
         self.changes_pending, self.changes_sent = None, 0.0
+        self.declare_parameter('timeline_keep', 30)        # deliveries whose timeline is kept on the website
+        self.timeline = {}               # request id -> [{t, icon, text, kind}] (insertion order = oldest first)
+        self.timeline_dirty = set()
+        self.create_subscription(String, '/robot_event', self._on_robot_event, 50)
+        self.create_subscription(String, '/health', lambda m: self._forward('health', m), QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
+        self.create_subscription(String, '/delivery_stats', self._on_stats, QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
+        self.create_timer(3.0, self._send_timeline)
         self.create_timer(5.0, self._send_wifi_map)
         self.grid = None                 # map for checking spots: (free bool array, wall distance m, res, ox, oy, h)
         self.spots_applied = None        # the /spots content last applied (to notice changes)
@@ -265,6 +281,7 @@ class FirebaseBridge(Node):
             try:
                 reqs = self._http('GET', 'requests') or {}
                 control = self._http('GET', 'control') or {}
+                self._check_admin_cmd(self._http('GET', 'adminCmd') or {})
                 self._check_spots()
                 if self.net_ok is False:
                     self.get_logger().info('Connection to Firebase restored')
@@ -276,6 +293,15 @@ class FirebaseBridge(Node):
                     self.get_logger().warn('Cannot reach Firebase (%s). Retrying...' % exc)
                 self.net_ok = False
             time.sleep(self.poll_period)
+
+    def _check_admin_cmd(self, cmd):
+        """Admin buttons that act on the robot system: a changed timestamp = the button was pressed."""
+        if not isinstance(cmd, dict):
+            return
+        if self.admin_cmd is not None and cmd.get('forgetChanges') != self.admin_cmd.get('forgetChanges'):
+            self.forget_changes_pub.publish(Empty())
+            self.get_logger().info('Admin: forget all map changes')
+        self.admin_cmd = cmd
 
     def _process(self, reqs):
         if self.first_poll:
@@ -547,6 +573,151 @@ class FirebaseBridge(Node):
             self.wifi_pending = json.loads(msg.data)
         except ValueError:
             pass
+
+    # ---------- "Why?" timeline ----------
+    def _place(self, pose):
+        """'near Cabin B' for a map position (the nearest spot), or '' when unknown."""
+        if not pose:
+            return ''
+        try:
+            spots = self._read_locations()[1].get('locations', {})
+        except Exception:
+            return ''
+        best, bd = None, 1e9
+        for name, p in spots.items():
+            d = math.hypot(float(p['x']) - pose[0], float(p['y']) - pose[1])
+            if d < bd:
+                best, bd = name, d
+        return '' if best is None else ('at ' if bd < 0.4 else 'near ') + self._label(best)
+
+    @staticmethod
+    def _label(name):
+        return 'Home' if name == 'home' else re.sub(r'^cabin_([A-Z])$', r'Cabin \1', name)
+
+    def _friendly(self, text):
+        return re.sub(r'cabin_([A-Z])', r'Cabin \1', text).replace(' -> ', ' → ').replace('home', 'Home')
+
+    def _timeline_line(self, ev):
+        """(icon, text, kind) for one robot event, or None for events that add nothing for a person."""
+        typ, text = ev.get('type'), ev.get('text') or ''
+        at = re.search(r'at \((-?[\d.]+), (-?[\d.]+)\)', text)          # path_guard names the blocked place
+        near = self._place((float(at.group(1)), float(at.group(2))) if at else ev.get('pose'))
+        near = (' ' + near) if near else ''
+        if typ == 'delivery':
+            for start, icon, kind, say in (
+                    ('Starting', '▶', 'start', None), ('At ', '📍', 'arrive', None),
+                    ('Shipped', '📦', 'shipped', None), ('Delivered', '✅', 'done', 'Delivered'),
+                    ('EMERGENCY STOP', '⛔', 'estop', 'Emergency stop pressed'),
+                    ('Emergency stop released', '▶', 'estop', 'Emergency stop released: continuing'),
+                    ('Every route', '🚧', 'blocked', 'Every route blocked: waited for the way to clear'),
+                    ('Back at home', '🏠', 'home', 'Back home'), ('Motor fault', '⚙', 'motor', None),
+                    ('Robot needs help', '🙋', 'help', None), ('Battery', '🔋', 'battery', None),
+                    ('Not enough battery', '🔋', 'battery', None), ('Timed out', '⌛', 'timeout', None),
+                    ('Back at ', '↩', 'returned', None), ('Cancelled', '✖', 'cancel', None)):
+                if text.startswith(start):
+                    if kind == 'arrive':           # "At cabin_A. Waiting for ..." -> "Arrived at Cabin A"
+                        say = 'Arrived at ' + self._friendly(text.split('.')[0][3:].strip())
+                    elif kind == 'start':          # "Starting job 1: cabin_A -> cabin_D" -> "Started: Cabin A → Cabin D"
+                        say = 'Started: ' + text.split(':', 1)[-1].strip()
+                    elif kind == 'shipped':        # "Shipped. Going to cabin_D"
+                        say = 'Parcel loaded: going to ' + text.split('Going to', 1)[-1].strip()
+                    return icon, self._friendly(say or text.split(' (')[0]), kind
+            return None                  # the rest repeats what the other events say
+        if typ == 'path':
+            kind = text.split(':', 1)[0]
+            if kind == 'waiting' and 'a person' in text:
+                return '🚶', 'A person was in the way' + near + ': waited for them to step aside', 'waited'
+            if kind == 'detour' and 'an object' in text:
+                return '↪', 'An object blocked the route' + near + ': took another way at once', 'detour'
+            return {'waiting': ('⏸', 'Waited: something was in the way' + near, 'waited'),
+                    'detour': ('↪', 'Route blocked' + near + ': took another way', 'detour'),
+                    'around': ('↷', 'Went round something' + near, 'around'),
+                    'blocked': ('🚧', 'No way through' + near + ': asked for the path to be cleared', 'blocked')}.get(kind)
+        if typ == 'localisation':
+            if text == 'lost':
+                return '🧭', 'Lost its position' + near, 'lost'
+            m = re.search(r'\((\d+) % match\)', text)
+            if text.startswith('verifying') and m:
+                return '🧭', 'Found its position again (%s %% match with the map)' % m.group(1), 'found'
+            if text.startswith('help'):
+                return '🙋', 'Could not find its position: needs help', 'help'
+            return None
+        if typ == 'gap_assist':
+            if text.startswith('Nav2 is stuck'):
+                return '↔', 'Narrow passage' + near + ': lining up', 'narrow'
+            if text.startswith('done: through the gap'):
+                return '↔', 'Through the narrow passage', 'narrow_ok'
+            if text.startswith('done: no safe way') or text.startswith('done: could not'):
+                return '⚠', 'Narrow passage: no safe way out found', 'narrow_fail'
+            return None
+        if typ == 'motor':
+            if text.startswith('SAFETY STOP'):
+                return '⚙', 'Motor controller fault: restarting it automatically', 'motor'
+            if text.startswith('RESTARTED'):
+                return '⚙', 'Motor controller running again', 'motor_ok'
+            return None
+        if typ == 'leg' and ev.get('arrived'):
+            return '⏱', '%.0f s, %.1f m' % (ev.get('seconds', 0), ev.get('driven_m') or 0), 'leg'
+        return None
+
+    def _on_robot_event(self, msg):
+        try:
+            ev = json.loads(msg.data)
+        except ValueError:
+            return
+        ref = ev.get('ref')
+        if not ref:
+            return
+        line = self._timeline_line(ev)
+        if line is None:
+            return
+        icon, text, kind = line
+        lines = self.timeline.setdefault(ref, [])
+        if kind == 'leg':                # the drive's time and distance go onto its arrival line
+            if lines and lines[-1]['kind'] in ('arrive', 'home', 'returned') and '(' not in lines[-1]['text']:
+                lines[-1]['text'] += ' (%s)' % text
+                self.timeline_dirty.add(ref)
+            return
+        if lines and lines[-1]['text'] == text:
+            return                       # the same thing twice in a row (e.g. a repeated status)
+        last = lines[-1] if lines else None
+        t = round(ev.get('t') or time.time())
+        if last and kind == 'narrow_ok' and last['kind'] == 'narrow':     # one line per narrow passage
+            last['text'] = last['text'].replace(': lining up', ': lined up and drove through')
+            last['kind'] = 'narrow_ok'
+            self.timeline_dirty.add(ref)
+            return
+        if last and kind == 'found' and last['kind'] == 'lost':           # one line per lost-and-found
+            last['text'] += ' → found it again after %d s%s' % (t - last['t'], text[len('Found its position again'):])
+            last['kind'] = 'lost_found'
+            self.timeline_dirty.add(ref)
+            return
+        lines.append({'t': t, 'icon': icon, 'text': text, 'kind': kind})
+        del lines[:-60]
+        self.timeline_dirty.add(ref)
+
+    def _forward(self, path, msg):
+        try:
+            self.out.put(('PUT', path, json.loads(msg.data), None))
+        except ValueError:
+            pass
+
+    def _on_stats(self, msg):
+        try:
+            body = json.loads(msg.data)
+        except ValueError:
+            return
+        self.out.put(('PUT', 'stats', body, None))     # delivery_stats publishes only when something changed
+
+    def _send_timeline(self):
+        for ref in list(self.timeline_dirty):
+            self.timeline_dirty.discard(ref)
+            self.out.put(('PUT', 'timeline/' + ref, self.timeline[ref], None))
+        keep = self.get_parameter('timeline_keep').value
+        while len(self.timeline) > keep:     # forget the oldest delivery, here and on the website
+            old = next(iter(self.timeline))
+            del self.timeline[old]
+            self.out.put(('DELETE', 'timeline/' + old, None, None))
 
     def _on_map_changes(self, msg):
         try:

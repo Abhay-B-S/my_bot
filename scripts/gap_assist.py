@@ -39,6 +39,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
+from std_srvs.srv import Empty as EmptySrv
 from tf2_ros import Buffer, TransformListener
 
 IDLE, TURNING, SETTLE, DRIVING = 'idle', 'turning', 'settle', 'driving'
@@ -251,6 +252,10 @@ class GapAssist(Node):
         self.create_subscription(String, '/path_status', lambda m: setattr(self, 'guard', m.data), latched)
         self.create_subscription(String, '/localization_status', lambda m: setattr(self, 'loc', m.data), latched)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel_assist', 10)
+        # after a manoeuvre, ask AMCL to compare the lidar with the map again at once: turning on the spot slips on
+        # marble and once left the position 2 m off (real test 2026-10-27); AMCL alone waits for the next 10 cm
+        self.nomotion = self.create_client(EmptySrv, 'request_nomotion_update')
+        self.nomotion_left, self.nomotion_next = 0, 0.0
         self.status_pub = self.create_publisher(String, '/gap_assist_status', latched)
 
         self.scan = self.plan = self.odom = None
@@ -358,6 +363,7 @@ class GapAssist(Node):
 
     def _finish(self, why):
         self._stop()
+        self.nomotion_left, self.nomotion_next = 3, time.monotonic() + 0.3
         self.state = IDLE
         self.cooldown_until = time.monotonic() + self.p['cooldown']
         self._status('done: %s' % why)
@@ -365,6 +371,11 @@ class GapAssist(Node):
     # ---------- main loop ----------
     def _tick(self):
         now = time.monotonic()
+        if self.nomotion_left and now >= self.nomotion_next:
+            self.nomotion_left -= 1
+            self.nomotion_next = now + 0.4
+            if self.nomotion.service_is_ready():
+                self.nomotion.call_async(EmptySrv.Request())
         if self.odom is None or self.scan is None:
             return
         if self.state == IDLE:

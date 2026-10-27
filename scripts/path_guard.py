@@ -16,6 +16,9 @@ again and goes back and forth (seen 2026-10-24 at home and in the simulator).
    itself switches to another way because of something within `wait_distance`.
 4. No other way within `reroute_seconds`, or Nav2 gives up -> "blocked": stay still and say so; continue once the
    lidar sees the spot free again. The delivery manager decides what to do next (check again, return the parcel).
+Person or object (-p classify:=true; obstacle_kind.py): while waiting, ~1.5 s of scans of the obstacle decide:
+   a PERSON -> wait up to `person_wait_seconds` for them to step aside; an OBJECT -> take another way at once (no wait);
+   unsure -> the normal wait. Off by default until tested on the real robot.
 Remembered ("blocked") spots go to the global costmap on /blocked_points, so Nav2 cannot forget them. They are
 forgotten after `memory_seconds`, when the lidar sees through them (obstacle gone), or on /path_guard/forget.
 
@@ -40,6 +43,8 @@ from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from std_msgs.msg import Empty, String
 from tf2_ros import Buffer, TransformListener
 
+from obstacle_kind import classify
+
 CLEAR, WAITING, REROUTING, BLOCKED = 'clear', 'waiting', 'rerouting', 'blocked'
 
 
@@ -63,6 +68,9 @@ class PathGuard(Node):
             'wait_distance': 1.5,      # m: Nav2 detours to another way because of something this close -> wait
             'min_points': 3,           # lidar points needed to count as "in the way" (ignores single noisy points)
             'wait_seconds': 4.0,       # s to wait for it to move (a person steps aside) before looking for another way
+            'classify': False,         # tell a person from an object while waiting (obstacle_kind.py)
+            'classify_after': 1.5,     # s of scans before deciding
+            'person_wait_seconds': 10.0,  # s to wait when it is a person
             'reroute_seconds': 8.0,    # s allowed for Nav2 to find another way
             'detour_extra': 1.0,       # m: a new route this much longer than the last one = Nav2 detours round something
             'memory_seconds': 180.0,   # s a blocked spot is remembered
@@ -252,6 +260,7 @@ class PathGuard(Node):
         """Change state and publish "<kind or state>: detail" ("clear" alone when plainly clear)."""
         if state != self.__dict__.get('state'):
             self.since = time.monotonic()
+            self.kind, self.kind_hist = None, []     # person/object: decided anew for every wait
             self.count_at_block = len(self.blocked)    # BLOCKED ends once some remembered point is forgotten
         self.state = state
         kind = kind or state
@@ -303,6 +312,27 @@ class PathGuard(Node):
         else:
             self._remember(stuck, 'Nav2 detoured round it')
             self._status(CLEAR, 'route blocked at %s, taking another way' % where, kind='detour')
+
+    def _classify(self, laser, now):
+        """While waiting: collect the obstacle's points (scan order) and, after classify_after s, decide person/object."""
+        if not self.p['classify'] or self.kind is not None or len(self.snapshot) == 0:
+            return
+        if self.scan is self.__dict__.get('kind_scan'):
+            return                                   # the guard ticks 10x a second, the lidar scans ~7x
+        self.kind_scan = self.scan
+        pts = self._scan_points(laser)
+        c = self.snapshot.mean(axis=0)
+        self.kind_hist.append(pts[np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1]) < 0.5] if len(pts) else pts)
+        if now - self.since < self.p['classify_after']:
+            return
+        kind, why = classify(self.kind_hist, np.array(laser[:2]), min_scans=6)
+        self.get_logger().info('the obstacle at (%.1f, %.1f) looks like: %s (%s)' % (c[0], c[1], kind, why))
+        if kind == 'unsure':
+            self.kind = 'unsure'
+            return
+        self.kind = kind
+        if kind == 'person':
+            self._status(WAITING, 'a person is in the way at (%.1f, %.1f), waiting for them to step aside' % tuple(c))
 
     def _on_forget(self, _msg):
         """The delivery manager asks to check the routes again: forget every remembered block."""
@@ -376,18 +406,22 @@ class PathGuard(Node):
             gone = not self._still_there(laser)
             self.gone_since = (self.gone_since or now) if gone else None
             plan_len = length(self._ahead(self.plan, axle, 1e9))
+            self._classify(laser, now)
+            limit = {'object': 0.0, 'person': self.p['person_wait_seconds']}.get(self.kind, self.p['wait_seconds'])
+            what = {'object': 'an object blocks the route', 'person': 'a person blocks the route'}.get(self.kind,
+                                                                                                    'route blocked')
             if gone and now - self.gone_since >= 1.0:
                 self._status(CLEAR, 'the way is free again')
             elif free_now and now - self.clear_since >= 0.5 and plan_len <= self.len_at_stop + self.p['detour_extra']:
                 self._status(CLEAR, 'going round it on the same route', kind='around')
-            elif now - self.since >= self.p['wait_seconds']:
-                self._remember(self.snapshot, 'still in the way')
+            elif now - self.since >= limit:
+                self._remember(self.snapshot, 'still in the way' if self.kind is None else 'it is %s' % self.kind)
                 if free_now:                          # Nav2 already has another way: take it
-                    self._status(CLEAR, 'route blocked at %s, taking another way'
-                                 % ('(%.1f, %.1f)' % tuple(self.snapshot.mean(axis=0))), kind='detour')
+                    self._status(CLEAR, '%s at %s, taking another way'
+                                 % (what, '(%.1f, %.1f)' % tuple(self.snapshot.mean(axis=0))), kind='detour')
                 else:
                     self.plan_mark = self.plan_count
-                    self._status(REROUTING, 'route blocked at %s, looking for another way' % where)
+                    self._status(REROUTING, '%s at %s, looking for another way' % (what, where))
         elif self.state == REROUTING:
             if free_now and self.plan_count > self.plan_mark + 1:
                 self._status(CLEAR, 'taking another way', kind='detour')

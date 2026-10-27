@@ -473,13 +473,18 @@ class DeliveryManager(Node):
     def _on_path_status(self, msg):
         kind = msg.data.split(':', 1)[0]
         previous, self.path_state = self.path_state, kind
-        if (kind == previous and kind != 'detour') or self.state in (IDLE, WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED):
+        person = 'a person' in msg.data              # path_guard -p classify:=true told a person from an object
+        news = kind == 'waiting' and person and not self.__dict__.get('waiting_person')
+        self.waiting_person = kind == 'waiting' and person
+        if (kind == previous and kind != 'detour' and not news) or \
+                self.state in (IDLE, WAIT_SHIPPED, WAIT_RECEIVED, WAIT_RETURNED):
             return
         target = self._current_target()
         if kind == 'around':
             self.get_logger().info('Going round something on the same route')
         elif kind == 'waiting':
-            self._publish('Something is in the way. Waiting for it to move...')
+            self._publish('A person is in the way. Waiting for them to step aside...' if person
+                          else 'Something is in the way. Waiting for it to move...')
         elif kind == 'rerouting':
             self._publish('The route is blocked. Looking for another way to %s...' % target)
         elif kind == 'detour':
@@ -491,7 +496,8 @@ class DeliveryManager(Node):
                 self.detour_spots.append(where)
             self.detours += 1
             if self.detours < self.get_parameter('max_detours').value:
-                self._publish('The route is blocked. Taking another way to %s.' % target)
+                self._publish('%s. Taking another way to %s.' % ('An object blocks the route' if 'an object' in msg.data
+                                                                 else 'The route is blocked', target))
             else:                                # blocks on different routes: every way must be blocked
                 self.get_logger().warn('%d blocked routes on this leg: treating every route as blocked' % self.detours)
                 kind = 'blocked'

@@ -16,16 +16,42 @@ SIMT="--ros-args -p use_sim_time:=true"
 ros2 launch my_bot launch_sim.launch.py world:=./src/my_bot/worlds/$WORLD.world gui:=${GUI:-true} > $S/logs/s_sim.log 2>&1 &
 wait_for $S/logs/s_sim.log 'Configured and started' 90 || { echo "simulator failed"; exit 1; }
 sleep 8      # the wheel odometry (odom frame) appears a few seconds later; localisation started before it hung
+# Foxy's diff_cont in Gazebo sometimes starts without odometry (no odom frame: localisation and Nav2 then fail, seen
+# several times). Check for the odom -> base_link transform; if it is missing, reload the wheel controller.
+odom_ok() { timeout 25 python3 - <<'PY'
+import sys, time, rclpy
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
+rclpy.init(); n = rclpy.create_node('odom_check', parameter_overrides=[rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, True)])
+b = Buffer(); TransformListener(b, n); t0 = time.time()
+while time.time() - t0 < 12:
+    rclpy.spin_once(n, timeout_sec=0.2)
+    if b.can_transform('odom', 'base_link', Time()):
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+for try in 1 2; do
+  odom_ok && break
+  echo "no wheel odometry yet: reloading the wheel controller (try $try)"
+  ros2 control switch_controllers --stop-controllers diff_cont > /dev/null 2>&1
+  ros2 control unload_controller diff_cont > /dev/null 2>&1
+  ros2 run controller_manager spawner.py diff_cont >> $S/logs/s_sim.log 2>&1
+  sleep 3
+done
 ros2 launch my_bot localization_launch.py map:=./maps/$MAP.yaml use_sim_time:=true > $S/logs/s_loc.log 2>&1 &
 wait_for $S/logs/s_loc.log 'Managed nodes are active' 60 || { echo "localisation failed"; exit 1; }
 python3 src/my_bot/scripts/set_pose.py home --file $SPOTS --ros-args -p use_sim_time:=true
 ros2 launch my_bot navigation_launch.py use_sim_time:=true map_subscribe_transient_local:=true > $S/logs/s_nav2.log 2>&1 &
 wait_for $S/logs/s_nav2.log 'Managed nodes are active' 120 || { echo "nav2 failed"; exit 1; }
 python3 -u src/my_bot/scripts/self_recovery.py $SIMT > $S/logs/s_recovery.log 2>&1 &
-python3 -u src/my_bot/scripts/path_guard.py $SIMT > $S/logs/s_guard.log 2>&1 &
+python3 -u src/my_bot/scripts/path_guard.py $SIMT -p classify:=true > $S/logs/s_guard.log 2>&1 &   # person/object
 python3 -u src/my_bot/scripts/gap_assist.py $SIMT > $S/logs/s_assist.log 2>&1 &
 python3 -u src/my_bot/scripts/battery_monitor.py --ros-args -p source:=sim > $S/logs/s_battery.log 2>&1 &   # simulated battery
 python3 -u src/my_bot/scripts/event_logger.py $SIMT -p log_file:=$S/sim_events.jsonl > $S/logs/s_events.log 2>&1 &
+python3 -u src/my_bot/scripts/delivery_stats.py --ros-args -p log_file:=$S/sim_events.jsonl > $S/logs/s_stats.log 2>&1 &
+python3 -u src/my_bot/scripts/health_check.py --ros-args -p skip:=ydlidar_ros2_driver_node,safety_watchdog,cargo_controller,firebase_bridge \
+    > $S/logs/s_health.log 2>&1 &
 python3 -u src/my_bot/scripts/wifi_probe.py $SIMT -p source:=sim > $S/logs/s_wifi_probe.log 2>&1 &     # made-up Wi-Fi
 python3 -u src/my_bot/scripts/wifi_mapper.py $SIMT -p map_name:=$MAP -p out_dir:=$S > $S/logs/s_wifi_map.log 2>&1 &
 python3 -u src/my_bot/scripts/change_detector.py $SIMT -p map_name:=$MAP -p out_dir:=$S > $S/logs/s_changes.log 2>&1 &

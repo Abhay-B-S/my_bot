@@ -95,8 +95,8 @@ class ChangeDetector(Node):
         p('search_xy', 0.20)         # m: alignment search around the localisation's pose
         p('search_deg', 8.0)         # degrees
         p('min_match', 0.75)         # share of ray ends that must land on mapped obstacles after alignment
-        p('min_new_cells', 2)
-        p('min_gone_cells', 3)
+        p('min_new_cells', 5)        # squares (5 cm): smaller marks were lidar noise or chair legs (real run 2026-10-27)
+        p('min_gone_cells', 5)
         p('trouble_radius', 0.6)     # m: trouble events closer than this are one spot
         p('publish_period', 5.0)
         g = lambda n: self.get_parameter(n).value

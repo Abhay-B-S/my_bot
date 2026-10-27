@@ -70,6 +70,24 @@
   #wifiText { margin-top: 6px; }
   #wifiText .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 3px 0 8px; }
   .maptoggles { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* "Why?" timeline under each delivery */
+  details.tl { margin-top: 8px; font-size: .88rem; }
+  /* Admin: statistics */
+  #healthBody ul { list-style: none; margin: 4px 0 12px; padding: 0; font-size: .88rem; }
+  #healthBody li { padding: 3px 0; }
+  #healthBody .lv { display: inline-block; width: 1.4em; }
+  #healthBody .warn { color: var(--warn); } #healthBody .fail { color: var(--bad); font-weight: 600; }
+  #statsBody table { width: 100%; border-collapse: collapse; font-size: .85rem; table-layout: fixed; }
+  #statsBody tr > :first-child { width: 40%; }
+  #statsBody th, #statsBody td { text-align: left; padding: 5px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+  #statsBody th { color: var(--muted); font-weight: 600; }
+  #statsBody td.num { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  #statsBody .foot { margin-top: 6px; }
+  details.tl summary { cursor: pointer; color: var(--accent); font-weight: 600; list-style-position: inside; }
+  details.tl .why { color: var(--muted); font-weight: 400; }
+  details.tl ol { list-style: none; margin: 6px 0 0; padding: 0 0 0 4px; border-left: 2px solid var(--line); }
+  details.tl li { padding: 3px 0 3px 10px; }
+  details.tl time { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
   #changesToggle { width: auto; margin: 10px 0 0; padding: 8px 12px; font-size: .9rem; }
   #changesToggle.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   #changesText { margin-top: 6px; }
@@ -167,6 +185,14 @@
     </div>
 
     <!-- Admin only: the robot's spots (home and the cabins) on the current map -->
+    <!-- Admin: numbers from the robot's own event log (delivery_stats.py) -->
+    <div class="card hidden" id="statsCard">
+      <h2>Robot health</h2>
+      <div id="healthBody" class="muted">No health check yet: it runs with the robot system.</div>
+      <h2>How the robot is doing</h2>
+      <div id="statsBody" class="muted">No statistics yet: they come from the robot system while it runs.</div>
+    </div>
+
     <div class="card hidden" id="adminCard">
       <div class="row">
         <div><strong>Admin</strong><div class="muted">Manage the robot's stops</div></div>
@@ -290,7 +316,8 @@ const STATUS = {   // status text on a request -> [what the user sees, chip colo
 
 const $ = id => document.getElementById(id);
 let current = null, requests = {}, robot = null, offset = 0, lastStatus = {}, lastDetail = {}, unsub = [];
-let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {}, eta = null, battery = null, wifiMap = null, mapChanges = null;
+let mapInfo = null, mapImg = null, pose = null, control = {}, spots = null, spotStatus = {}, eta = null, battery = null, wifiMap = null, mapChanges = null, timeline = {}, stats = null, health = null;
+const openTimelines = new Set();   // timelines the person opened (kept open when the list is redrawn)
 const ADMIN_ID = "admin";
 
 function cabinLabel(c) { return c.replace("_", " "); }
@@ -361,6 +388,7 @@ function startApp() {
   });
   $("sendCard").classList.toggle("hidden", !!current.admin);
   $("adminCard").classList.toggle("hidden", !current.admin);
+  $("statsCard").classList.toggle("hidden", !current.admin);
   $("listTitle").textContent = current.admin ? "All deliveries" : "My deliveries";
   listen(db.ref("spots"), s => { spots = s.val() || {}; renderSpots(); renderTeachers(); fillSendTo(); drawMap(); });
   listen(db.ref("spotStatus"), s => { spotStatus = s.val() || {}; renderSpots(); });
@@ -374,6 +402,9 @@ function startApp() {
     listen(db.ref("battery"), s => { battery = s.val(); renderBattery(); });
     listen(db.ref("wifiMap"), s => { wifiMap = s.val(); drawMap(); });
     listen(db.ref("mapChanges"), s => { mapChanges = s.val(); drawMap(); });
+    listen(db.ref("timeline"), s => { timeline = s.val() || {}; render(); });
+    listen(db.ref("stats"), s => { stats = s.val(); renderStats(); });
+    listen(db.ref("health"), s => { health = s.val(); renderHealth(); });
     return;
   }
   $("whoName").textContent = current.name;
@@ -388,6 +419,7 @@ function startApp() {
   listen(db.ref("battery"), s => { battery = s.val(); renderBattery(); });
   listen(db.ref("wifiMap"), s => { wifiMap = s.val(); drawMap(); });
   listen(db.ref("mapChanges"), s => { mapChanges = s.val(); drawMap(); });
+  listen(db.ref("timeline"), s => { timeline = s.val() || {}; render(); });
 }
 
 function listen(ref, cb) {
@@ -1090,6 +1122,16 @@ function renderChangesText() {
   trouble.slice().sort((a, b) => b.n - a.n).slice(0, 6).forEach(t => ul.appendChild(el("li", "", "Trouble " + nearSpot(t.x, t.y) +
     ": " + Object.entries(t.kinds).map(([k, n]) => k + (n > 1 ? " ×" + n : "")).join(", ") + (t.last ? " (last " + time(t.last) + ")" : ""))));
   box.appendChild(ul);
+  if (current && current.admin) {        // e.g. after the furniture was put back, or after mapping again
+    const b = el("button", "quiet", "Forget these changes");
+    b.style.width = "auto"; b.style.marginTop = "8px";
+    b.onclick = () => {
+      if (!confirm("Forget all changes and trouble spots found on this map? The robot starts collecting again.")) return;
+      db.ref("adminCmd/forgetChanges").set(firebase.database.ServerValue.TIMESTAMP);
+      b.disabled = true; b.textContent = "Sent: the list clears within a few seconds";
+    };
+    box.appendChild(b);
+  }
 }
 $("changesToggle").onclick = () => {
   showChanges = !showChanges;
@@ -1140,6 +1182,106 @@ function etaLine(id, r, mine) {
 }
 setInterval(() => { if (eta && current) render(); }, 5000);   // count down between the robot's updates
 
+// ---------- Admin: health check (health_check.py on the laptop, every 30 s) ----------
+function renderHealth() {
+  const box = $("healthBody");
+  if (!health || !health.checks) return;
+  const online = robot && robot.heartbeat && (Date.now() + offset - robot.heartbeat) < 20000;
+  box.className = "";
+  box.textContent = "";
+  const when = new Date(health.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const head = { ok: "✅ Everything OK", warn: "⚠️ Working, but check the orange items", fail: "❌ Not ready: fix the red items" };
+  box.appendChild(el("div", health.overall === "ok" ? "good" : health.overall === "fail" ? "badtext" : "",
+    (online ? head[health.overall] : "Robot system is offline (last check below)") + " · checked " + when));
+  const ul = document.createElement("ul");
+  const icon = { ok: "✓", warn: "!", fail: "✗" };
+  health.checks.forEach(c => {
+    const li = document.createElement("li");
+    li.appendChild(el("span", "lv " + c.level, icon[c.level]));
+    li.appendChild(el("strong", c.level === "ok" ? "" : c.level, c.name + ": "));
+    li.appendChild(document.createTextNode(c.text));
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
+}
+
+// ---------- Admin: statistics (delivery_stats.py on the laptop reads the robot's event log) ----------
+function renderStats() {
+  const box = $("statsBody");
+  if (!stats || !stats.all) return;
+  const secs = v => v == null ? "–" : v >= 60 ? Math.floor(v / 60) + " min " + Math.round(v % 60) + " s" : Math.round(v) + " s";
+  const pct = v => v == null ? "–" : v + " %";
+  const rows = [
+    ["Deliveries completed", d => d.deliveries.delivered],
+    ["Success rate", d => pct(d.success_pct)],
+    ["Completed without any help", d => pct(d.on_its_own_pct)],
+    ["Average delivery time", d => secs(d.avg_s) + (d.median_s != null ? " (median " + secs(d.median_s) + ")" : "")],
+    ["Distance driven", d => d.metres + " m" + (d.avg_speed ? " at " + d.avg_speed.toFixed(2) + " m/s" : "")],
+    ["Narrow passages (through / tried)", d => d.narrow.through + " / " + d.narrow.tries],
+    ["Position lost → found again", d => d.lost.found + " / " + d.lost.times + (d.lost.avg_s != null ? ", in " + d.lost.avg_s + " s on average" : "")],
+    ["Obstacles: waited / went round / other route", d => d.waits + " / " + d.around + " / " + d.detours],
+    ["Emergency stops", d => d.estops],
+    ["Motor controller restarted itself", d => d.motor_restarts],
+    ["Energy per delivery", d => d.wh_per_delivery != null ? d.wh_per_delivery + " Wh" : "– (battery sensor not fitted)"],
+  ];
+  const table = document.createElement("table"), head = document.createElement("tr");
+  ["", "Today", "All time"].forEach(h => head.appendChild(el("th", "", h)));
+  table.appendChild(head);
+  rows.forEach(([label, f]) => {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("th", "", label));
+    [stats.today, stats.all].forEach(d => tr.appendChild(el("td", "num", d ? String(f(d)) : "–")));
+    table.appendChild(tr);
+  });
+  box.className = "";
+  box.textContent = "";
+  box.appendChild(table);
+  const a = stats.all.deliveries;
+  box.appendChild(el("div", "muted foot", "Not delivered (all time): " + a.failed + " failed, " + a.returned +
+    " brought back to the sender, " + a.interrupted + " interrupted, " + a.cancelled + " cancelled. " +
+    "Success rate = delivered out of all started deliveries except cancelled ones."));
+}
+
+// ---------- "Why?" timeline: what happened during a delivery (firebase_bridge turns the robot's event log into words) ----------
+function whySummary(lines) {
+  const n = k => lines.filter(l => k.includes(l.kind)).length;
+  const parts = [], plural = (c, one, many) => c + " " + (c === 1 ? one : many);
+  const narrow = n(["narrow", "narrow_ok", "narrow_fail"]), waited = n(["waited"]), detour = n(["detour"]);
+  const around = n(["around"]), lost = n(["lost", "lost_found"]), estop = n(["estop"]) / 2, motor = n(["motor"]);
+  if (narrow) parts.push(plural(narrow, "narrow passage", "narrow passages"));
+  if (waited) parts.push(plural(waited, "wait for an obstacle", "waits for obstacles"));
+  if (around) parts.push(plural(around, "obstacle passed", "obstacles passed"));
+  if (detour) parts.push(plural(detour, "detour", "detours"));
+  if (lost) parts.push("position lost " + (lost === 1 ? "once" : lost + " times") + " (found again)");
+  if (estop >= 1) parts.push(plural(Math.round(estop), "emergency stop", "emergency stops"));
+  if (motor) parts.push("motor controller restarted");
+  const secs = lines[lines.length - 1].t - lines[0].t;
+  const dur = secs >= 60 ? Math.floor(secs / 60) + " min " + (secs % 60) + " s" : secs + " s";
+  return dur + (parts.length ? " · " + parts.join(", ") : " · no problems on the way");
+}
+function timelineBox(id) {
+  const lines = timeline && timeline[id];
+  if (!lines || !lines.length) return null;
+  const d = document.createElement("details");
+  d.className = "tl";
+  d.open = openTimelines.has(id);
+  d.ontoggle = () => { if (d.open) openTimelines.add(id); else openTimelines.delete(id); };
+  const sum = document.createElement("summary");
+  sum.appendChild(document.createTextNode("What happened "));
+  sum.appendChild(el("span", "why", "(" + whySummary(lines) + ")"));
+  d.appendChild(sum);
+  const ol = document.createElement("ol");
+  lines.forEach(l => {
+    const li = document.createElement("li"), tm = document.createElement("time");
+    tm.textContent = new Date(l.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    li.appendChild(tm);
+    li.appendChild(document.createTextNode(l.icon + " " + l.text));
+    ol.appendChild(li);
+  });
+  d.appendChild(ol);
+  return d;
+}
+
 function render() {
   updateFlash();
   drawMap();
@@ -1164,6 +1306,8 @@ function render() {
     if (r.urgent && r.reason) card.appendChild(el("div", "muted", "Why urgent: " + r.reason));
     const etaText = etaLine(id, r, mine);
     if (etaText) card.appendChild(el("div", "eta", "⏱ " + etaText));
+    const tl = timelineBox(id);
+    if (tl) card.appendChild(tl);
     if (r.status === "wait_shipped" && r.sender === mine && !r.shipped && lidMode()) {
       lidSteps(card, id, r.lidSender, "lidSender", "shipped", "put the parcel in", "Close lid & send");
     } else if (r.status === "wait_shipped" && r.sender === mine && !r.shipped) {
