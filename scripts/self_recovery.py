@@ -69,10 +69,15 @@ class SelfRecovery(Node):
             'max_range': 6.0,         # ignore far scan points (less reliable)
             'cooldown': 10.0,         # s after a recovery before another can start
             'self_radius': 0.20,      # m from the lidar: closer points are the robot itself or its open lid
+            'check_at_start': True,   # the start script sets the Home spot as a first guess; if the live match there
+                                      # is below good_threshold, search the whole map once (no turning) and take a
+                                      # clearly better pose: the robot starts from where it really stands (real test
+                                      # 2026-10-29: placed 35 cm / 130 deg off Home -> 36-58 % match, lost, spinning)
         }
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.p = {k: self.get_parameter(k).value for k in defaults}
+        self.start_checked = False
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(OccupancyGrid, '/map', self._on_map, latched)
@@ -277,6 +282,23 @@ class SelfRecovery(Node):
                 self.last_log = now
                 self.get_logger().info('match %.0f %% (%s)' % (100 * m, self.state))
 
+        if self.state == OK and self.p['check_at_start'] and not self.start_checked and m is not None:
+            self.start_checked = True
+            if m < self.p['good_threshold'] and self.scan is not None and self.info is not None:
+                res = self._search()
+                if res is not None:
+                    lx, ly, lyaw, score, other = res
+                    # 0.05 below the usual bar: the start pose is only a guess (real test: 75 % vs 17 % kept the guess)
+                    if score >= self.p['good_threshold'] - 0.05 and score - other >= self.p['unique_margin'] \
+                            and score >= m + 0.10:
+                        x, y, yaw = self._set_pose(lx, ly, lyaw)
+                        self.searches = 0
+                        self._status(VERIFY, 'start: the given start pose matched only %.0f %%; found x=%.2f y=%.2f '
+                                     'facing %.0f deg (%.0f %% match); checking' % (100 * m, x, y, math.degrees(yaw), 100 * score))
+                        self.verify_until = time.monotonic() + self.p['verify_seconds']
+                        return
+                    self.get_logger().info('start: given pose %.0f %%, best elsewhere %.0f %% (other %.0f %%): keeping it'
+                                           % (100 * m, 100 * score, 100 * other))
         if self.state == OK:
             if self.lid_open:                    # the lid may hide a third of the view: no judgement now
                 self.low_since = None

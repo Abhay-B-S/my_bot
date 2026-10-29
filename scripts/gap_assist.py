@@ -42,7 +42,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Empty as EmptySrv
 from tf2_ros import Buffer, TransformListener
 
-IDLE, TURNING, SETTLE, DRIVING = 'idle', 'turning', 'settle', 'driving'
+IDLE, TURNING, SETTLE, DRIVING, BACKING = 'idle', 'turning', 'settle', 'driving', 'backing'
 
 
 def grow(body, margin):
@@ -229,6 +229,16 @@ class GapAssist(Node):
             'turn_speed': 0.45,       # rad/s (slower does not move the heavy robot on marble)
             'drive_speed': 0.12,      # m/s
             'max_assists': 4,         # per Nav2 goal
+            'backup_distance': 0.12,  # m reversed at least when the straight drive is stopped by something ahead: from a step
+                                      # back the lidar sees the gap better and the next plan has room to turn (real
+                                      # test 2026-10-29: 10 cm free on the left, stopped after 0.11 m and gave up)
+            'backup_speed': 0.12,     # m/s (reversing in teleop at about this speed was smooth)
+            'backup_turn': 0.3,       # rad/s while reversing, nose turning away from the nearer side
+            'backup_back_free': 0.10, # m that must stay free behind the body (checked live)
+            'backup_max': 0.35,       # m: never reverse more than this in one go
+            'backup_front_clear': 0.25,  # m free in front of the box before turning: it turns round the front axle,
+                                      # its front corners sweep 0.15 m from the axle (0.065 m past the front face)
+            'max_backups': 2,         # per assist
             'cooldown': 6.0,          # s after an assist before the next one
         }
         for k, v in defaults.items():
@@ -388,6 +398,8 @@ class GapAssist(Node):
                 self._plan_step(now)
         elif self.state == DRIVING:
             self._drive(now)
+        elif self.state == BACKING:
+            self._back(now)
 
     def _watch(self, now):
         moved = self.last_pose is None or math.hypot(self.odom[0] - self.last_pose[0], self.odom[1] - self.last_pose[1]) > 0.03 \
@@ -405,7 +417,7 @@ class GapAssist(Node):
         self.assists += 1
         self._status('Nav2 is stuck in a narrow spot: lining up with the gap (try %d of %d)'
                      % (self.assists, self.p['max_assists']))
-        self.steps, self.then_plan, self.no_straight = 0, False, False
+        self.steps, self.then_plan, self.no_straight, self.backups = 0, False, False, 0
         self.commit_sign = 0          # turning direction kept while the route is behind the robot
         self._plan_step(now)
 
@@ -508,6 +520,8 @@ class GapAssist(Node):
                 self._stop()
                 self.state, self.until, self.no_straight = SETTLE, now + 0.4, True
                 return
+            if self._start_backup(now, pts):
+                return
             return self._finish('stopped: something ahead (drove %.2f m)' % done)
         if done >= self.drive_left or now > self.until:
             if self.then_plan:                         # a 10 cm move of a sequence: settle, then plan again
@@ -519,6 +533,44 @@ class GapAssist(Node):
         c.linear.x = self.p['drive_speed']
         self.cmd_pub.publish(c)
 
+
+    def _start_backup(self, now, pts):
+        """Something ahead stopped the straight drive: reverse a little, nose turning away from the nearer side,
+        then plan again from there. Only with room behind, and at most max_backups times per assist."""
+        if self.backups >= self.p['max_backups'] or not len(pts):
+            return False
+        need = self.p['backup_distance'] + self.p['backup_back_free']   # room for at least the minimum back-up
+        if clearances(pts, self.body)['back'] < need:
+            self.get_logger().info('blocked ahead, but no room to back up (%.2f m behind)'
+                                   % clearances(pts, self.body)['back'])
+            return False
+        c = clearances(pts, self.body)
+        self.backup_turn = -1.0 if c['left'] < c['right'] else 1.0     # left closer -> nose turns right
+        self.backups += 1
+        self._stop()
+        self.start = self.odom
+        self.state, self.until = BACKING, now + self.p['backup_max'] / self.p['backup_speed'] + 2.0
+        self._status('blocked ahead: backing up until %.0f cm free in front (%.0f-%.0f cm), nose turning %s (back-up %d of %d)'
+                     % (100 * self.p['backup_front_clear'], 100 * self.p['backup_distance'], 100 * self.p['backup_max'], 'right' if self.backup_turn < 0 else 'left',
+                        self.backups, self.p['max_backups']))
+        return True
+
+    def _back(self, now):
+        done = math.hypot(self.odom[0] - self.start[0], self.odom[1] - self.start[1])
+        pts = self._points()
+        behind = clearances(pts, self.body)['back'] if pts is not None and len(pts) else 9.9
+        front = clearances(pts, self.body)['front'] if pts is not None and len(pts) else 0.0
+        enough = done >= self.p['backup_distance'] and front >= self.p['backup_front_clear']
+        if enough or done >= self.p['backup_max'] or now > self.until or behind < self.p['backup_back_free']:
+            self.get_logger().info('backed up %.2f m: %.2f m free in front, %.2f m behind' % (done, front, behind))
+            self._stop()
+            self.no_straight = False
+            self.state, self.until = SETTLE, now + 0.4      # look again from here (fresh scan, new plan)
+            return
+        c = Twist()
+        c.linear.x = -self.p['backup_speed']
+        c.angular.z = self.backup_turn * self.p['backup_turn']
+        self.cmd_pub.publish(c)
 
 def main():
     rclpy.init()

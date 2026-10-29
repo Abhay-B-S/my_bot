@@ -64,6 +64,7 @@ import queue
 import re
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -143,7 +144,7 @@ class FirebaseBridge(Node):
         self.timeline = {}               # request id -> [{t, icon, text, kind}] (insertion order = oldest first)
         self.timeline_dirty = set()
         self.create_subscription(String, '/robot_event', self._on_robot_event, 50)
-        self.create_subscription(String, '/health', lambda m: self._forward('health', m), QoSProfile(
+        self.create_subscription(String, '/health', lambda m: self._forward_json('health', m), QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
         self.create_subscription(String, '/delivery_stats', self._on_stats, QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
@@ -290,7 +291,9 @@ class FirebaseBridge(Node):
                 self._check_estop(control if isinstance(control, dict) else {})
             except Exception as exc:                      # network down, bad JSON, ...
                 if self.net_ok is not False:
-                    self.get_logger().warn('Cannot reach Firebase (%s). Retrying...' % exc)
+                    where = traceback.extract_tb(exc.__traceback__)[-1]     # file line, so program errors are findable
+                    self.get_logger().warn('Cannot reach Firebase (%s, line %d in %s). Retrying...'
+                                           % (exc, where.lineno, where.name))
                 self.net_ok = False
             time.sleep(self.poll_period)
 
@@ -696,7 +699,7 @@ class FirebaseBridge(Node):
         del lines[:-60]
         self.timeline_dirty.add(ref)
 
-    def _forward(self, path, msg):
+    def _forward_json(self, path, msg):
         try:
             self.out.put(('PUT', path, json.loads(msg.data), None))
         except ValueError:

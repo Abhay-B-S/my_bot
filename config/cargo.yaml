@@ -11,11 +11,11 @@
 
 lid:                  # servo that opens and closes the cardboard lid
   enabled: true       # angles below calibrated 2026-10-24 (servo_console.py)
-  servo: 0
-  servo2: 1           # 2026-10-23: a second servo lifts the lid together with servo 0 (same side, same direction)
+  servo: 1           # 2026-10-29: the one lid servo is on D10 (servo 1); was 0 (D9)
+  servo2: null        # 2026-10-29: one servo (D9) lifts the lid; was 1 (second servo on D10)
   servo2_mirror: false   # true if the second servo is mounted mirror-image (it then gets 180 - angle)
   closed: 0           # lid shut (2026-10-27: re-calibrated after refitting the servos; was 10)
-  open: 66            # lid open (2026-10-24, confirmed 2026-10-27 after refitting)
+  open: 70            # lid open (2026-10-29: user set 0-70; was 66)
   release_when_closed: true    # let the servo go limp once the lid is shut (saves current; the lid rests by itself)
   release_when_open: false     # keep holding the lid open while a person loads or unloads the box
 

@@ -191,13 +191,22 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan
+        observation_sources: scan ultrasonic
         scan:
           topic: /scan
           max_obstacle_height: 2.0
           clearing: True
           marking: True
           data_type: "LaserScan"
+        ultrasonic:           # scripts/ultrasonic_guard.py: low things under the lidar (sensor 10 cm up, front)
+          topic: /ultrasonic_points
+          data_type: "PointCloud2"
+          marking: True
+          clearing: True
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_range: 1.2     # from base_link: the guard marks up to 1.0 m from the sensor (0.085 m ahead)
+          raytrace_range: 1.5     # its 'nothing here' point sits at 1.29 m: clears without marking
       static_layer:
         map_subscribe_transient_local: True
       always_send_full_costmap: True
@@ -222,7 +231,8 @@ global_costmap:
       footprint: "[[0.18, 0.19], [0.18, -0.19], [-0.28, -0.19], [-0.28, 0.19]]"
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]   # low_layer off: its sticky marks
+                                     # blocked routes after a few stops (2026-10-29); ultrasonic only in the local costmap
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -247,6 +257,19 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+      low_layer:              # 2026-10-29: low things under the lidar (ultrasonic/IR, scripts/ultrasonic_guard.py)
+        plugin: "nav2_costmap_2d::ObstacleLayer"   # own layer: the lidar looks OVER them and, in the same layer,
+        enabled: True                             # its free rays erased the marks (planner drove into a box)
+        observation_sources: ultrasonic
+        ultrasonic:           # scripts/ultrasonic_guard.py: low things under the lidar (sensor 10 cm up, front)
+          topic: /ultrasonic_points
+          data_type: "PointCloud2"
+          marking: True
+          clearing: True
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_range: 1.2     # from base_link: the guard marks up to 1.0 m from the sensor (0.085 m ahead)
+          raytrace_range: 1.5     # its 'nothing here' point sits at 1.29 m: clears without marking
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.5   # 2026-10-26: cost falls off slower, so routes keep to the middle of passages and

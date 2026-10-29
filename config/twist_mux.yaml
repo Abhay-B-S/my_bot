@@ -22,6 +22,10 @@ twist_mux:
         topic   : cmd_vel_assist
         timeout : 0.5
         priority: 45
+      ultrasonic:                   # scripts/ultrasonic_guard.py (Pi): no driving forward into something low
+        topic   : cmd_vel_ultrasonic
+        timeout : 0.3
+        priority: 47
       recovery:
         topic   : cmd_vel_recovery
         timeout : 0.5
