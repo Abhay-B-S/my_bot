@@ -57,7 +57,9 @@ python3 -u src/my_bot/scripts/wifi_mapper.py $SIMT -p map_name:=$MAP -p out_dir:
 python3 -u src/my_bot/scripts/change_detector.py $SIMT -p map_name:=$MAP -p out_dir:=$S > $S/logs/s_changes.log 2>&1 &
 python3 -u src/my_bot/scripts/eta_estimator.py $SIMT -p locations_file:=$SPOTS -p log_file:=$S/sim_events.jsonl \
     > $S/logs/s_eta.log 2>&1 &
-python3 -u src/my_bot/scripts/delivery_manager.py $SIMT -p locations_file:=$SPOTS -p self_recovery:=true \
+# LID=real: lid buttons on the website move the real lid (only cargo_controller.py running on the Pi)
+[ "${LID:-0}" = "real" ] && LIDARGS="-p cargo_lock:=true -p lid_buttons:=true"
+python3 -u src/my_bot/scripts/delivery_manager.py $SIMT -p locations_file:=$SPOTS -p self_recovery:=true $LIDARGS \
     -p path_guard:=true -p battery_aware:=true -p battery_trust_sim:=true -p energy_file:=$S/sim_energy.json \
     > $S/logs/s_manager.log 2>&1 &
 wait_for $S/logs/s_manager.log 'Ready at home' 30 || { echo "manager failed"; exit 1; }

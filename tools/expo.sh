@@ -34,7 +34,7 @@ robot)
     IP=$(pi) || true; [ -z "$IP" ] && { echo "Robot not found (see: expo.sh find)"; exit 1; }
     echo "Starting the robot side on $IP (about 40 s) ..."
     ssh ubuntu@$IP 'nohup setsid ~/start_all.sh lid > /dev/null 2>&1 < /dev/null & sleep 38
-        for p in ydlidar_ros2_driver ros2_control_node safety_watchdog ultrasonic_guard cargo_controller; do
+        for p in ydlidar_ros2_driver ros2_control_node safety_watchdog ultrasonic_guard battery_monitor cargo_controller; do
             ps -eo args | grep -v -e "^bash" -e "^/bin/bash" -e "^-bash" | grep -q "$p" && echo "  OK   $p" || echo "  MISSING  $p"; done
         ls /dev/ydlidar /dev/arduino /dev/servo_nano > /dev/null 2>&1 && echo "  OK   USB names" || echo "  CHECK USB cables (lidar, Uno, Nano in their usual ports)"'
     ping -c 4 -q $IP | awk -F/ '/rtt/{printf "  Wi-Fi delay: %d ms (good below 50)\n", $5}'

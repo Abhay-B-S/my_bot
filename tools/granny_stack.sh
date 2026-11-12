@@ -26,7 +26,7 @@ if [ "${LID:-0}" = "sim" ]; then
 elif [ "${LID:-0}" = "real" ]; then   # the real lid: cargo_controller runs ON THE PI (start it there with ~/start_all.sh lid)
   LIDARGS="-p cargo_lock:=true -p lid_buttons:=true"
 fi
-python3 -u src/my_bot/scripts/delivery_manager.py --ros-args -p locations_file:=$SPOTS -p self_recovery:=true -p path_guard:=true $LIDARGS > $S/logs/g_manager.log 2>&1 &
+python3 -u src/my_bot/scripts/delivery_manager.py --ros-args -p locations_file:=$SPOTS -p self_recovery:=true -p path_guard:=true -p battery_aware:=${BATTERY:-true} $LIDARGS > $S/logs/g_manager.log 2>&1 &
 wait_for $S/logs/g_manager.log 'Ready at home' 30 || { echo "manager failed"; exit 1; }
 python3 -u src/my_bot/scripts/firebase_bridge.py --ros-args -p map_yaml:=./maps/$MAP.yaml -p locations_file:=$SPOTS > $S/logs/g_bridge.log 2>&1 &
 wait_for $S/logs/g_bridge.log 'Bridge started' 30 && echo "STACK READY $(date +%T)"

@@ -33,7 +33,7 @@ import time
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
@@ -83,6 +83,7 @@ class SelfRecovery(Node):
         self.create_subscription(OccupancyGrid, '/map', self._on_map, latched)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         self.lid_open = False        # /cargo_state "moving" or "unlocked": the lid may be up in front of the lidar
+        self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(String, '/cargo_state', self._on_cargo_state, latched)
         self.status_pub = self.create_publisher(String, '/localization_status', latched)
         self.match_pub = self.create_publisher(String, '/localization_match', 10)
@@ -99,6 +100,8 @@ class SelfRecovery(Node):
         self.low_since = None
         self.good_count = 0
         self.searches = 0
+        self.help_since = 0.0
+        self.spun_at = -10.0
         self.turn_until = 0.0
         self.verify_until = 0.0
         self.cooldown_until = 0.0
@@ -262,7 +265,13 @@ class SelfRecovery(Node):
         return x, y, yaw
 
     # ---------- the state machine ----------
+    def _on_odom(self, msg):
+        if abs(msg.twist.twist.angular.z) > 0.5:
+            self.spun_at = time.monotonic()                # turning fast: the scan lags and the match dips for a moment
+
     def _status(self, state, detail):
+        if state == HELP and self.state != HELP:
+            self.help_since = time.monotonic()
         self.state = state
         if state == OK:
             text = 'recovered' if detail == 'recovered' else 'ok'
@@ -300,6 +309,9 @@ class SelfRecovery(Node):
                     self.get_logger().info('start: given pose %.0f %%, best elsewhere %.0f %% (other %.0f %%): keeping it'
                                            % (100 * m, 100 * score, 100 * other))
         if self.state == OK:
+            if now - self.spun_at < 1.5:         # turning fast: a short dip is normal, not a lost position
+                self.low_since = None
+                return
             if self.lid_open:                    # the lid may hide a third of the view: no judgement now
                 self.low_since = None
                 return
@@ -324,7 +336,13 @@ class SelfRecovery(Node):
             self._status(OK, 'recovered')
             return
 
-        if self.state == TURNING and now >= self.turn_until:
+        if self.state == HELP and now - self.help_since >= 5.0:
+            # asked for help: keep trying (the robot may have been moved into open space meanwhile)
+            self.help_since = now
+            self.searches = 0
+            self.cmd_pub.publish(Twist())
+            self._search_now()
+        elif self.state == TURNING and now >= self.turn_until:
             self.cmd_pub.publish(Twist())
             self._search_now()
         elif self.state == VERIFY and now >= self.verify_until:

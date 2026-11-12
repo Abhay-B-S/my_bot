@@ -10,11 +10,15 @@ Sources (parameter `source`):
 
 Charge (%): from the pack voltage, corrected for the drop under load (voltage + current x internal resistance),
 looked up in a Li-ion resting-voltage table, then smoothed, so it does not jump every time the motors start.
+The % is the USABLE charge: 0 % is `cutoff_volts` (9.5 V for the pack, the lowest voltage at which the L298N still
+drives the motors properly), not the cells' own 3.0 V empty point. `usable_wh` is the energy between full and the
+cut-off, which delivery_manager uses to predict whether a trip can still be finished.
 Health: the internal resistance is measured whenever the current changes quickly (it is the voltage change divided
 by the current change); it rises as cells age or when one cell is weak (like the 1.2 V cell found on 2026-10-23).
 
 Publishes /battery_status (String JSON, latched) every `period` s:
-  {source, v, a, w, pct, wh, state: ok|low|critical|charging|off, r_ohm, over_range, t}
+  {source, v, a, w, pct (usable), pct_cell (cell-table %), usable_wh, cutoff_v, wh,
+   state: ok|low|critical|charging|off, r_ohm, over_range, t}
   off = no voltage (below `off_volts`): the power switch is on OFF or CHARGE (the sensor sits on the RUN side, so
   it cannot see the charging itself); pct is then null and is read fresh once the switch is back on RUN.
 Simulation only: /battery_sim_set (std_msgs/Float32, %) sets the simulated charge, e.g. 100 = "charged".
@@ -120,8 +124,9 @@ class BatteryMonitor(Node):
         p('cells', 3)
         p('capacity_ah', 2.5)              # 18650 2500 mAh cells in series
         p('internal_ohm', 0.15)            # whole pack incl. BMS and wires: first guess, replaced by the measurement
-        p('low_pct', 25.0)                 # below: no new deliveries (delivery_manager)
-        p('critical_pct', 10.0)            # below: go home now
+        p('cutoff_volts', 9.5)             # pack voltage counted as 0 % usable (motor driver limit)
+        p('low_pct', 25.0)                 # below: shown as "low" on the website
+        p('critical_pct', 10.0)            # below: shown as "critical"; the trip prediction in delivery_manager acts
         p('off_volts', 6.0)                # below: power switched off (a 3S pack is never this low while on)
         p('period', 1.0)
         p('sim_start_pct', 85.0)
@@ -130,6 +135,9 @@ class BatteryMonitor(Node):
         self.source, self.cells = g('source'), g('cells')
         self.r_default = g('internal_ohm')
         self.low, self.critical, self.off_volts = g('low_pct'), g('critical_pct'), g('off_volts')
+        self.cut_pct = pct_from_cell(g('cutoff_volts') / self.cells)      # cell-table % at the cut-off (about 9 %)
+        self.cutoff_v = g('cutoff_volts')
+        self.usable_wh = self.cells * 3.6 * g('capacity_ah') * (1.0 - self.cut_pct / 100.0)
         if self.source == 'sim':
             self.dev = SimBattery(self, self.cells, g('capacity_ah'), self.r_default, g('sim_start_pct'),
                                   g('sim_speedup'))
@@ -138,6 +146,7 @@ class BatteryMonitor(Node):
         self.pub = self.create_publisher(String, '/battery_status', QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
         self.pct = None
+        self.pct_cell = None
         self.wh = 0.0
         self.last_t = None
         self.prev = None                   # (volts, amps) of the previous reading, for the resistance
@@ -175,7 +184,8 @@ class BatteryMonitor(Node):
                 self.r_samples = (self.r_samples + [r])[-30:]
         self.prev = (volts, amps)
         r = self._resistance()
-        raw = pct_from_cell((volts + max(amps, 0.0) * r) / self.cells)
+        self.pct_cell = pct_from_cell((volts + max(amps, 0.0) * r) / self.cells)
+        raw = min(100.0, max(0.0, 100.0 * (self.pct_cell - self.cut_pct) / (100.0 - self.cut_pct)))   # usable %
         # smooth (~20 s); the first reading, and a jump of over 20 % (battery changed or charged), taken as is
         self.pct = raw if self.pct is None or abs(raw - self.pct) > 20 else self.pct + 0.05 * (raw - self.pct)
         if amps < -0.05:
@@ -195,7 +205,9 @@ class BatteryMonitor(Node):
             self.state = state
         self.pub.publish(String(data=json.dumps({
             'source': self.source, 'v': round(volts, 2), 'a': round(amps, 2), 'w': round(volts * amps, 1),
-            'pct': None if pct is None else round(pct), 'wh': round(self.wh, 3), 'state': state,
+            'pct': None if pct is None else round(pct, 1),
+            'pct_cell': None if pct is None else round(self.pct_cell, 1),
+            'usable_wh': round(self.usable_wh, 2), 'cutoff_v': self.cutoff_v, 'wh': round(self.wh, 3), 'state': state,
             'r_ohm': round(self._resistance(), 3) if len(self.r_samples) >= 5 else None, 'over_range': over,
             't': round(time.time(), 1)})))
 

@@ -52,14 +52,26 @@ Blocked routes (needs scripts/path_guard.py running):  -p path_guard:=true
   The same giving-up rules apply when Nav2 fails a leg `max_nav_retries` times for any other reason.
 
 Battery (needs scripts/battery_monitor.py running):  -p battery_aware:=true
-  Before starting a job the robot estimates the energy it needs for the worst case: from where it is to the sender,
-  to the receiver, back to the sender (route blocked, parcel returned) and home: straight-line metres x `wh_per_m`
-  (learned from its own trips, kept in energy_file) + `wait_wh` for the waiting. If the battery would end below
-  `reserve_pct`, the job stays in the queue, the robot goes home and asks to be charged; it starts by itself once the
-  battery is high enough again. If the battery turns "critical" on the way to a sender (no parcel on board yet),
-  that job goes back to the front of the queue and the robot goes home. With a parcel on board it always finishes.
-  Motor power switched off (battery "off"): no job starts. A simulated battery (no sensor fitted) is ignored unless
-  -p battery_trust_sim:=true (Gazebo tests only).
+  The battery % is the USABLE charge (0 % = 9.5 V, see battery_monitor.py). Energy for a trip = straight-line metres
+  x `wh_per_m` (learned from the robot's own legs, kept in energy_file) + `wait_wh` per stop at a cabin, as a % of
+  the pack's usable energy. `reserve_pct` must always be left over.
+  Before a job (at Home, or right after the previous job): the worst case is checked, from here to the sender, the
+  receiver, back to the sender (parcel returned) and home. If it does not fit, with low_battery_action "decline"
+  (default) the request is turned down with an apology on the website and the robot goes home to charge; "hold"
+  keeps the job in the queue until the battery is charged (old behaviour).
+  During a job the prediction is repeated every `energy_check_period` s for the REST of the job, and the robot acts
+  only when the shortfall lasts `energy_shortfall_s` s (a passing voltage dip is ignored):
+    no parcel on board yet (going to the sender, or waiting there before the lid was opened)
+                       -> the job is stopped with an apology, the robot goes home to charge
+    parcel just loaded ("shipped" pressed) but the trip to the receiver and home does not fit
+                       -> the robot stays with the sender, apologises and asks for the parcel to be taken back
+    on the way to the receiver -> the cheaper safe option: back to the sender (parcel returned) when that is nearer,
+                       else finish this delivery when it still fits, else straight home with the parcel; afterwards
+                       the robot goes home to charge instead of taking the next job
+    bringing a parcel back -> carries on when it fits, else straight home with the parcel
+  The check never blocks anything when there is no fresh reading (sensor missing, charging, simulated battery),
+  so normal deliveries are not slowed down. Motor power switched off (battery "off"): no job starts.
+  A simulated battery is ignored unless -p battery_trust_sim:=true (Gazebo tests only).
 
 Run (sim, Nav2 already running):
   python3 src/my_bot/scripts/delivery_manager.py --ros-args -p use_sim_time:=true
@@ -121,9 +133,14 @@ class DeliveryManager(Node):
         self.declare_parameter('max_wait', 300.0)             # s: a normal job waiting this long goes before nearer ones
         self.declare_parameter('battery_aware', False)        # True = check the battery before each job
         self.declare_parameter('battery_wh', 27.0)            # usable energy of a full pack: 3 x 3.6 V x 2.5 Ah
-        self.declare_parameter('wh_per_m', 0.15)              # first guess, then learned (Wh per straight-line metre)
-        self.declare_parameter('wait_wh', 0.5)                # energy for the waiting at the two cabins
-        self.declare_parameter('reserve_pct', 12.0)           # battery % that must be left after the worst case
+        self.declare_parameter('wh_per_m', 0.05)              # first guess, then learned (Wh per straight-line metre);
+                                                              # INA219 logs at the expo gave about 0.006-0.02
+        self.declare_parameter('wait_wh', 0.25)               # energy for waiting at one cabin
+        self.declare_parameter('reserve_pct', 12.0)           # usable % that must be left after the trip
+        self.declare_parameter('low_battery_action', 'decline')  # decline: turn a request down with an apology;
+                                                              # hold: keep it queued until charged
+        self.declare_parameter('energy_check_period', 2.0)    # s between predictions during a job
+        self.declare_parameter('energy_shortfall_s', 10.0)    # s a shortfall must last before the robot acts
         self.declare_parameter('energy_file', '~/dev_ws/run_logs/energy_model.json')
         self.declare_parameter('battery_trust_sim', False)    # act on a SIMULATED battery too (tests in Gazebo only;
                                                               # never on the real robot: its numbers are made up)
@@ -211,10 +228,15 @@ class DeliveryManager(Node):
         self.leg_energy = None           # (Wh counter, x, y) at the start of the current leg, for learning wh_per_m
         self.energy_path = os.path.expanduser(self.get_parameter('energy_file').value)
         self.wh_per_m = self.get_parameter('wh_per_m').value
+        self.energy_next = 0.0           # next in-trip battery prediction (monotonic s)
+        self.short_since = None          # since when the battery has looked too low for the rest of the job
         try:
             with open(self.energy_path) as f:
-                self.wh_per_m = float(json.load(f)['wh_per_m'])
-        except (OSError, ValueError, KeyError):
+                saved = json.load(f)
+            # a value learned on the simulated battery is made up: never use it on the real robot
+            if saved.get('source') != 'sim' or self.get_parameter('battery_trust_sim').value:
+                self.wh_per_m = float(saved['wh_per_m'])
+        except (OSError, ValueError, KeyError, AttributeError):
             pass
         if self.battery_aware:
             self.create_subscription(String, '/battery_status', self._on_battery, status_qos)
@@ -297,6 +319,19 @@ class DeliveryManager(Node):
         if self.state != WAIT_SHIPPED:
             self.get_logger().warn('Ignoring "shipped": state is %s' % self.state)
             return
+        b = self._fresh_battery()
+        if b is not None:
+            need, _ = self._trip_pct([self.job['destination'], self.home], waits=1)
+            if b['pct'] - need < self.get_parameter('reserve_pct').value:
+                # the parcel is still at the sender: the cheapest safe choice is to give it back right here
+                self.job['battery_abort'] = True
+                self.battery_hold = True
+                self.state = WAIT_RETURNED
+                self.deadline = time.monotonic() + self.get_parameter('wait_received_timeout').value
+                self._publish('Sorry, the battery is too low (%.0f %%) to take the parcel to %s and come back '
+                              '(needs about %.0f %%). Please take the parcel back out and tap "Close lid & done"; '
+                              'the robot will then go home to charge.' % (b['pct'], self.job['destination'], need))
+                return
         self.state = TO_DROPOFF
         self._publish('Shipped. Going to %s' % self.job['destination'])
         self._go(self.job['destination'])
@@ -306,7 +341,7 @@ class DeliveryManager(Node):
             self.get_logger().warn('Ignoring "received": state is %s' % self.state)
             return
         self.state = RETURNING
-        if self.queue and not self.get_parameter('go_home_between_jobs').value:
+        if self.queue and not self.battery_hold and not self.get_parameter('go_home_between_jobs').value:
             # no trip home: the main loop starts the waiting job in about a second, from right here
             self._publish('Delivered job %d. Going straight to the next job (%d waiting)'
                           % (self.job['id'], len(self.queue)), result='delivered')
@@ -321,7 +356,13 @@ class DeliveryManager(Node):
             return
         self.state = RETURNING
         result = 'cancelled' if self.job.get('cancelled') else 'returned'
-        if self.queue and not self.get_parameter('go_home_between_jobs').value:
+        if self.job.get('battery_abort'):
+            self._publish('Parcel of job %d returned to %s. Sorry for the trouble: the battery was too low to deliver '
+                          'it. Going home to charge; please request again later.' % (self.job['id'], self.job['sender']),
+                          result=result)
+            self._go(self.home)
+            return
+        if self.queue and not self.battery_hold and not self.get_parameter('go_home_between_jobs').value:
             self._publish('Parcel of job %d returned to %s. Going straight to the next job (%d waiting)'
                           % (self.job['id'], self.job['sender'], len(self.queue)), result=result)
         else:
@@ -836,6 +877,9 @@ class DeliveryManager(Node):
                           % (what, self.job['id'], self.home), result='failed')
             self._go(self.home)
 
+        # battery prediction for the rest of the current job (does nothing without a fresh reading)
+        self._energy_guard(now)
+
         # start the next job (see _next_job), not in the same instant as the previous status
         if self.state == IDLE and self.queue and not self.lost and not self.motor_fault and not self.estop \
                 and now - self.last_publish >= 1.0:
@@ -860,7 +904,8 @@ class DeliveryManager(Node):
         if b.get('source') == 'sim' and not self.get_parameter('battery_trust_sim').value:
             return
         self.battery, self.battery_t = b, time.monotonic()
-        if self.battery.get('state') == 'critical' and self.state == TO_PICKUP and self.job is not None:
+        if (self.battery.get('state') == 'critical' and self.state == TO_PICKUP and self.job is not None
+                and self.get_parameter('low_battery_action').value == 'hold'):
             # no parcel on board yet: put the job back and go home to charge
             job, self.job = self.job, None
             self.queue.appendleft(job)
@@ -882,41 +927,142 @@ class DeliveryManager(Node):
         p = self.locations[self.last_spot]
         return float(p['x']), float(p['y'])
 
-    def _job_pct(self, job):
-        """Battery % the job needs in the worst case: here -> sender -> receiver -> sender -> home."""
-        pts = [self._here()] + [(float(self.locations[n]['x']), float(self.locations[n]['y']))
-                                for n in (job['sender'], job['destination'], job['sender'], self.home)]
+    def _fresh_battery(self):
+        """The last battery reading when it can be used for a decision, else None. A missing, old, failed,
+        simulated (unless trusted) or charging reading never blocks or stops a delivery."""
+        if not self.battery_aware:
+            return None
+        b = self.battery
+        if b is None or time.monotonic() - self.battery_t > 15.0 or b.get('error') or b.get('pct') is None:
+            return None
+        if b.get('state') in ('charging', 'off'):
+            return None
+        return b
+
+    def _trip_pct(self, names, waits=0):
+        """Usable battery % to drive from here through the named spots (straight lines) and wait at `waits` stops."""
+        pts = [self._here()] + [(float(self.locations[n]['x']), float(self.locations[n]['y'])) for n in names]
         metres = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
-        wh = metres * self.wh_per_m + self.get_parameter('wait_wh').value
-        return 100.0 * wh / self.get_parameter('battery_wh').value, metres
+        wh = metres * self.wh_per_m + waits * self.get_parameter('wait_wh').value
+        usable = (self.battery or {}).get('usable_wh') or self.get_parameter('battery_wh').value
+        return 100.0 * wh / usable, metres
+
+    def _go_home_to_charge(self):
+        if self.state == IDLE and self.last_spot != self.home and not self.want_goal and not self.navigating:
+            self.state = RETURNING
+            self._publish('Going home to charge.')
+            self._go(self.home)
 
     def _battery_ok(self, job):
-        """True = the job may start. Otherwise the robot goes (or stays) home and says why."""
+        """True = the job may start. Otherwise the request is declined (or held) and the robot goes home."""
         if not self.battery_aware:
             return True
         b = self.battery
-        if b is None or time.monotonic() - self.battery_t > 15.0 or b.get('error'):
-            return True                      # no (real) battery reading: never block the deliveries
-        if b.get('state') == 'off':
+        if b is not None and time.monotonic() - self.battery_t <= 15.0 and b.get('state') == 'off':
             msg = 'Motor power is switched off. Switch it on to start job %d.' % job['id']
-        else:
-            need, metres = self._job_pct(job)
-            left = b['pct'] - need
-            if left >= self.get_parameter('reserve_pct').value:
-                return True
-            msg = ('Battery %d %%: job %d (%s -> %s, about %.0f m with a possible return) needs about %.0f %%, '
-                   'which would leave %.0f %%. Please charge the robot; the job starts by itself afterwards.'
-                   % (b['pct'], job['id'], job['sender'], job['destination'], metres, need, max(left, 0)))
+            self.battery_hold = True
+            if msg != self.battery_msg:
+                self.battery_msg = msg
+                self._publish(msg)
+            return False
+        b = self._fresh_battery()
+        if b is None:
+            return True                      # no usable reading: never block the deliveries
+        need, metres = self._trip_pct([job['sender'], job['destination'], job['sender'], self.home], waits=2)
+        left = b['pct'] - need
+        if left >= self.get_parameter('reserve_pct').value:
+            return True
         self.battery_hold = True
+        if self.get_parameter('low_battery_action').value == 'decline':
+            self.queue.remove(job)
+            self._publish('Sorry, the robot cannot take this delivery now: the battery is at %.0f %% and %s -> %s '
+                          '(about %.0f m, with a possible return) needs about %.0f %%. The robot is going to charge; '
+                          'please request again later.' % (b['pct'], job['sender'], job['destination'], metres, need),
+                          rejected_ref=job.get('ref'))
+            self._go_home_to_charge()
+            return False
+        msg = ('Battery %.0f %%: job %d (%s -> %s, about %.0f m with a possible return) needs about %.0f %%. '
+               'Please charge the robot; the job starts by itself afterwards.'
+               % (b['pct'], job['id'], job['sender'], job['destination'], metres, need))
         if self.state == IDLE and self.last_spot != self.home and not self.want_goal and not self.navigating:
-            self.state = RETURNING
-            self._publish('Not enough battery for the next job: going home to charge.')
-            self._go(self.home)
+            self._go_home_to_charge()
             return False
         if msg != self.battery_msg:
             self.battery_msg = msg
             self._publish(msg)
         return False
+
+    def _energy_guard(self, now):
+        """During a job: predict whether the battery lasts for the rest of it, and stop the job safely if not."""
+        if self.job is None or now < self.energy_next:
+            return
+        self.energy_next = now + self.get_parameter('energy_check_period').value
+        b = self._fresh_battery()
+        st = self.state
+        if b is None or self.estop or st not in (TO_PICKUP, WAIT_SHIPPED, TO_DROPOFF, RETURN_TO_SENDER) \
+                or (st == WAIT_SHIPPED and self.lid_opened) or self.job.get('battery_abort'):
+            self.short_since = None
+            return
+        sender, dest, home = self.job['sender'], self.job['destination'], self.home
+        if st in (TO_PICKUP, WAIT_SHIPPED):
+            need, _ = self._trip_pct([sender, dest, home], waits=2)       # finish the job and get home
+        elif st == TO_DROPOFF:
+            need, _ = self._trip_pct([dest, home], waits=1)
+        else:
+            need, _ = self._trip_pct([sender, home], waits=1)
+        if b['pct'] - need >= self.get_parameter('reserve_pct').value:
+            self.short_since = None
+            return
+        if self.short_since is None:
+            self.short_since = now
+            self.get_logger().warn('Battery %.0f %% may not last for the rest of job %d (needs about %.0f %%): '
+                                   'checking again' % (b['pct'], self.job['id'], need))
+            return
+        if now - self.short_since < self.get_parameter('energy_shortfall_s').value:
+            return
+        self.short_since = None
+        self._battery_abort(b['pct'], need)
+
+    def _battery_abort(self, pct, need):
+        """The rest of the job will not fit in the battery: choose the cheapest safe way out and apologise."""
+        job, sender, dest, home = self.job, self.job['sender'], self.job['destination'], self.home
+        sorry = 'Sorry, the battery is too low (%.0f %%) to finish job %d safely (about %.0f %% needed)' \
+            % (pct, job['id'], need)
+        self.battery_hold = True
+        if self.state in (TO_PICKUP, WAIT_SHIPPED):                     # nothing on board yet
+            job['battery_abort'] = True
+            self._abandon_goal()
+            self.estop_target = None
+            self.state = RETURNING
+            self._publish('%s, so it is stopped before pick-up. The robot is going home to charge; please request '
+                          'again later.' % sorry, result='failed')
+            self._go(home)
+            return
+        back, _ = self._trip_pct([sender, home], waits=1)
+        ahead, _ = self._trip_pct([dest, home], waits=1)
+        direct, _ = self._trip_pct([home])
+        if self.state == TO_DROPOFF and back <= ahead and pct - back >= 0:
+            job['battery_abort'] = True
+            self._abandon_goal()
+            self.state = RETURN_TO_SENDER
+            self._publish('%s. Bringing the parcel back to %s, then going home to charge.' % (sorry, sender))
+            self._go(sender)
+        elif self.state == TO_DROPOFF and pct - ahead >= 0:
+            job['battery_abort'] = True         # the receiver is the nearest way to empty the box: finish, then charge
+            self._publish('Battery low (%.0f %%): finishing this delivery to %s, then going home to charge.'
+                          % (pct, dest))
+        elif self.state == RETURN_TO_SENDER and pct - back >= 0:
+            job['battery_abort'] = True
+            self._publish('Battery low (%.0f %%): bringing the parcel back to %s, then going home to charge.'
+                          % (pct, sender))
+        else:
+            job['battery_abort'] = True
+            self._abandon_goal()
+            self.estop_target = None
+            self.state = RETURNING
+            self._publish('%s. Going straight home (about %.0f %% needed): the parcel stays in the robot, please '
+                          'collect it at %s.' % (sorry, direct, home), result='failed')
+            self._go(home)
 
     def _learn_energy(self, target):
         """Update wh_per_m from the leg just finished (energy used / straight-line distance)."""
@@ -928,7 +1074,7 @@ class DeliveryManager(Node):
         used = self.battery['wh'] - start[0]
         if metres < 1.0 or used <= 0:
             return
-        self.wh_per_m = min(1.0, max(0.03, 0.8 * self.wh_per_m + 0.2 * used / metres))
+        self.wh_per_m = min(1.0, max(0.005, 0.8 * self.wh_per_m + 0.2 * used / metres))
         try:
             os.makedirs(os.path.dirname(self.energy_path), exist_ok=True)
             with open(self.energy_path, 'w') as f:

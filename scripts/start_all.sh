@@ -15,8 +15,9 @@ WATCH='^python3 -u /home/ubuntu/robot_ws/src/my_bot/scripts/safety_watchdog.py'
 LIDC='^python3 -u /home/ubuntu/robot_ws/src/my_bot/scripts/cargo_controller.py'
 WIFI='^python3 -u /home/ubuntu/robot_ws/src/my_bot/scripts/wifi_probe.py'
 SONAR='^python3 -u /home/ubuntu/robot_ws/src/my_bot/scripts/ultrasonic_guard.py'
+BATT='^python3 -u /home/ubuntu/robot_ws/src/my_bot/scripts/battery_monitor.py'
 # nothing ROS running yet: clear leftovers of force-stopped programs (they can freeze ROS messaging)
-if ! running "$LIDAR|$CTRL|$WATCH|$LIDC|$WIFI|$SONAR"; then
+if ! running "$LIDAR|$CTRL|$WATCH|$LIDC|$WIFI|$SONAR|$BATT"; then
     ros2 daemon stop > /dev/null 2>&1
     rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*
 fi
@@ -32,6 +33,9 @@ running "$WATCH" || nohup python3 -u ~/robot_ws/src/my_bot/scripts/safety_watchd
 # front ultrasonic sensor (GPIO 23/24): stops forward driving into low things, marks them for Nav2
 [ -f ~/robot_ws/src/my_bot/scripts/ultrasonic_guard.py ] && ! running "$SONAR" && \
     nohup python3 -u ~/robot_ws/src/my_bot/scripts/ultrasonic_guard.py > ~/ultrasonic.log 2>&1 &
+# motor battery voltage/current from the INA219 (I2C 0x40) -> /battery_status -> website battery card
+[ -f ~/robot_ws/src/my_bot/scripts/battery_monitor.py ] && ! running "$BATT" && \
+    nohup python3 -u ~/robot_ws/src/my_bot/scripts/battery_monitor.py --ros-args -p source:=ina219 > ~/battery.log 2>&1 &
 if [ "$1" = "lid" ] && ! running "$LIDC"; then
     nohup python3 -u ~/robot_ws/src/my_bot/scripts/cargo_controller.py > ~/cargo.log 2>&1 &
 fi

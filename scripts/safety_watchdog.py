@@ -11,7 +11,9 @@ It trips when
   - a real drive command (>= 0.08 m/s or 0.3 rad/s; any reverse >= 0.03 m/s) is active but neither wheel reading
     changes for 5 s = the Arduino stopped answering, or a wheel is stalled or jammed, or
   - while REVERSING, a wheel turns much faster than asked (> reverse_burst_factor x the commanded wheel speed, and
-    > 4 rad/s) = the "backward burst" seen in the lifted test of 2026-10-26 (13 rad/s for a 1.5 rad/s request).
+    > 4 rad/s) = the "backward burst" seen in the lifted test of 2026-10-26 (13 rad/s for a 1.5 rad/s request), or
+  - both wheels turn AGAINST the command (average > 2 rad/s the other way for 1 s) = the Arduino's speed loop drives
+    the wrong way (real fault 2026-11-12, cured by resetting the Arduino, which the stop does).
 Then it ends the motor controller process (ros2_control_node), so no more commands reach the Arduino, opens
 /dev/arduino itself and sends stop commands (opening the port also restarts the Arduino into a stopped state),
 and publishes the reason on /safety_event (std_msgs/String, latched).
@@ -51,6 +53,8 @@ class SafetyWatchdog(Node):
         self.declare_parameter('min_cmd_reverse', 0.03)     # m/s: reverse commands from this speed count as driving
         self.declare_parameter('reverse_burst_factor', 3.0)  # wheel faster than this x the commanded speed = burst
         self.declare_parameter('wheel_radius', 0.034)       # m (to turn the commanded m/s into wheel rad/s)
+        self.declare_parameter('wrong_way_speed', 2.0)      # rad/s: both wheels (average) this fast AGAINST the command ...
+        self.declare_parameter('wrong_way_seconds', 1.0)    # ... for this long = the Arduino drives the wrong way
         self.declare_parameter('port', '/dev/arduino')
         self.declare_parameter('dry_run', False)
         self.declare_parameter('auto_restart', True)        # start the motor controller again after a stop
@@ -73,6 +77,7 @@ class SafetyWatchdog(Node):
         self.restarts = []            # times of automatic restarts
         self.restart_at = None        # when to start the motor controller again
         self.restarting_until = None  # waiting for wheel readings after a restart
+        self.wrong_since = None       # when the wheels started turning against the command
 
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              reliability=ReliabilityPolicy.RELIABLE)
@@ -104,6 +109,7 @@ class SafetyWatchdog(Node):
         if self.restarting_until is not None:      # first readings from the restarted controller: watch again
             self.restarting_until, self.tripped = None, False
             self.last_pos, self.last_change, self.cmd_since = (now, pos), now, None
+            self.wrong_since = None
             self.get_logger().info('Motor controller restarted: watching again')
             self.event_pub.publish(String(data='RESTARTED: motor controller running again'))
             return
@@ -127,6 +133,23 @@ class SafetyWatchdog(Node):
                         self._trip('while reversing at %.2f m/s, %s turned at %.1f rad/s (limit %.1f): backward burst'
                                    % (self.cmd_x, n, speed, limit))
                         return
+            # wrong way: forward asked, both wheels backward (or the reverse). Real fault 2026-11-12: after an Arduino
+            # restart its speed loop drove both wheels backward at full power (-15 rad/s) for a 0.05-0.08 m/s request;
+            # resetting the Arduino (what a trip does) cured it.
+            if abs(self.cmd_x) >= 0.03 and now < self.cmd_x_until and dt > 0.02:
+                avg = sum(pos[n] - p0[n] for n in WHEELS) / 2.0 / dt
+                if avg * self.cmd_x < 0 and abs(avg) > self.get_parameter('wrong_way_speed').value:
+                    self.wrong_since = self.wrong_since or now
+                    if now - self.wrong_since >= self.get_parameter('wrong_way_seconds').value:
+                        self.wrong_since = None
+                        self._trip('asked %.2f m/s but the wheels turn the other way at %.1f rad/s for %.1f s: '
+                                   'the motor Arduino drives the wrong way'
+                                   % (self.cmd_x, avg, self.get_parameter('wrong_way_seconds').value))
+                        return
+                else:
+                    self.wrong_since = None
+            else:
+                self.wrong_since = None
         self.last_pos = (now, pos)
 
     def _check_frozen(self):
