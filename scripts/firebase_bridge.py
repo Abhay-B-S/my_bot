@@ -130,6 +130,9 @@ class FirebaseBridge(Node):
         self.forget_changes_pub = self.create_publisher(Empty, '/map_changes/reset', 10)
         self.admin_cmd = None              # last /adminCmd seen (the first one only sets the baseline)
         self.create_subscription(String, '/delivery_eta', self._on_eta, 10)
+        # 2026-11-25: "the robot is at cabin_A now" -> /record_spot "cabin_A": the current map pose is sent to /spots like an
+        # Admin tap, so the usual spot check, the spot file and the manager reload all apply (tools/spot_here.sh)
+        self.create_subscription(String, '/record_spot', self._on_record_spot, 10)
         self.last_eta, self.last_eta_sent = None, 0.0
         self.create_subscription(String, '/battery_status', self._on_battery, QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE))
@@ -782,6 +785,24 @@ class FirebaseBridge(Node):
         except Exception as exc:                       # no PIL, missing file, ...: the rest still works
             self.get_logger().warn('Map not sent to the website (%s)' % exc)
             return None
+
+    def _on_record_spot(self, msg):
+        name = msg.data.strip()
+        if not re.match(r'^(home|cabin_[A-Z])$', name):
+            self.get_logger().warn('record_spot: bad name %r (use home or cabin_A ... cabin_Z)' % name)
+            return
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_link', Time())
+        except Exception:
+            self.get_logger().warn('record_spot: robot position unknown (no map -> base_link yet)')
+            return
+        tr, q = t.transform.translation, t.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        spot = {'x': round(tr.x, 3), 'y': round(tr.y, 3), 'yaw': round(yaw, 3), 'by': 'robot position',
+                't': {'.sv': 'timestamp'}}
+        self.out.put(('PUT', 'spots/%s' % name, spot, None))
+        self.get_logger().info('record_spot: %s = robot position x=%.2f y=%.2f yaw=%.0f deg (sent for checking)'
+                               % (name, spot['x'], spot['y'], math.degrees(yaw)))
 
     def _send_pose(self):
         try:
